@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --topbar-bg: #0c0e12;
+    --topbar-text: #f4f1ea;
+    --topbar-border: rgba(255, 255, 255, 0.08);
+    --accent: #FAF7F1;
+    --accent-hover: #ffffff;
+    --accent-light: #ffffff;
+    --accent-subtle: rgba(250, 247, 241, 0.12);
+    --accent-border: rgba(250, 247, 241, 0.35);
+    --bg-canvas: #090a0d;
+    --surface-card: #111319;
+    --surface-border: rgba(255, 255, 255, 0.07);
+    --text-primary: #FAF7F1;
+    --text-secondary: #9c978b;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+  }
+
+  h1, h2, h3, h4, .font-topic {
+    font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* Notebook aesthetic utilities */
+.notebook-grid-pattern {
+  background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.045) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+
+.notebook-ruled-lines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 31px,
+    rgba(255, 255, 255, 0.04) 31px,
+    rgba(255, 255, 255, 0.04) 32px
+  );
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 9999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(250, 247, 241, 0.35);
+}

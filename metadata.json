@@ -1,0 +1,6 @@
+{
+  "name": "Watch Party",
+  "description": "Watch Party — Synchronized movie watching experience with real-time video sync, notebook aesthetics, and 6-digit room codes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,68 @@
+import { MovieItem } from '../types';
+
+export const MOVIES_CATALOG: MovieItem[] = [
+  {
+    id: 'film_deep_orbit',
+    title: 'DEEP ORBIT',
+    subtitle: 'A Quiet Atmospheric Sci-Fi Journey',
+    duration: '12 min 14s',
+    year: 2024,
+    genre: 'Sci-Fi / Drama',
+    director: 'Eliza Reed',
+    description:
+      'Stationed alone on an orbital telemetry outpost overlooking an emerald nebula, communications technician Ronald monitors a dormant quantum beacon when an uncataloged signal breaks through the silence.',
+    posterUrl: '/src/assets/images/poster_solaris_drift_1792164877765.jpg',
+    videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
+    curatorNote: 'Featured in Campus Sci-Fi Society Autumn Screening 2025',
+    activeRoomsCount: 4,
+    tags: ['4K Synced', 'Dolby 5.1', 'English Subtitles', 'Staff Pick'],
+  },
+  {
+    id: 'film_night_coast',
+    title: 'NIGHT COAST',
+    subtitle: 'A Neo-Noir Midnight Run',
+    duration: '10 min 32s',
+    year: 2023,
+    genre: 'Neo-Noir / Thriller',
+    director: 'Arthur Reed',
+    description:
+      'A nocturnal driver takes a solitary run along the serpentine coastal highway through rain and neon street reflections, delivering a locked film canister before first dawn.',
+    posterUrl: '/src/assets/images/poster_coastal_drive_1792164893344.jpg',
+    videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
+    curatorNote: 'Winner of Best Cinematography · Coastal Student Film Guild',
+    activeRoomsCount: 7,
+    tags: ['1080p Master', 'Original Score', 'Campus Favorite'],
+  },
+  {
+    id: 'film_velocity_runner',
+    title: 'VELOCITY: URBAN RUNNER',
+    subtitle: 'Neo-Tokyo Rooftop Sprint',
+    duration: '14 min 50s',
+    year: 2025,
+    genre: 'Animation / Cyberpunk',
+    director: 'Ren Kurosawa',
+    description:
+      'In a tiered vertical metropolis where data couriers outrun automated enforcement drones, Kai takes on a contraband physical parcel that could unlock the city’s private neural grid.',
+    posterUrl: '/src/assets/images/poster_cyber_courier_1792164894470.jpg',
+    videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4',
+    curatorNote: 'Hand-drawn animation with electronic analog synthesizer score',
+    activeRoomsCount: 11,
+    tags: ['Ultra HD', 'Stereo Mix', 'Trending Today'],
+  },
+  {
+    id: 'film_glasshouse_echoes',
+    title: 'GLASSHOUSE ECHOES',
+    subtitle: 'Campus Observatory Nights',
+    duration: '15 min 28s',
+    year: 2024,
+    genre: 'Arthouse / Indie',
+    director: 'Elias Thorne',
+    description:
+      'Two university botany researchers spend their final semester archiving rare night-blooming specimens inside the 1920s campus dome while debating their divergent futures.',
+    posterUrl: '/src/assets/images/poster_solaris_drift_1792164877765.jpg',
+    videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
+    curatorNote: 'Archived by the Campus Film Society · 35mm Remaster',
+    activeRoomsCount: 3,
+    tags: ['Cinema Club', 'Acoustic Score', 'Dialogue Centric'],
+  },
+];

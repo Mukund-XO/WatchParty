@@ -1,68 +1,89 @@
 import { MovieItem } from '../types';
+import { sanitizeSingleLine } from '../utils/security';
 
+/**
+ * Sample library. These are the Blender Foundation's open movies, streamed from Google's public
+ * sample bucket. They are licensed under Creative Commons Attribution, which requires the credit
+ * lines below to stay visible wherever the films are shown.
+ */
 export const MOVIES_CATALOG: MovieItem[] = [
   {
-    id: 'film_deep_orbit',
-    title: 'DEEP ORBIT',
-    subtitle: 'A Quiet Atmospheric Sci-Fi Journey',
-    duration: '12 min 14s',
-    year: 2024,
-    genre: 'Sci-Fi / Drama',
-    director: 'Eliza Reed',
+    id: 'tears-of-steel',
+    title: 'Tears of Steel',
+    subtitle: 'Sci-fi short with live action and VFX',
+    duration: '~12 min',
+    year: 2012,
+    genre: 'Sci-Fi',
+    director: 'Ian Hubert',
     description:
-      'Stationed alone on an orbital telemetry outpost overlooking an emerald nebula, communications technician Ronald monitors a dormant quantum beacon when an uncataloged signal breaks through the silence.',
-    posterUrl: '/src/assets/images/poster_solaris_drift_1792164877765.jpg',
+      'A small group of soldiers and scientists makes a last stand against hostile robots in a ruined Amsterdam, in a short made to showcase open-source visual effects.',
     videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
-    curatorNote: 'Featured in Campus Sci-Fi Society Autumn Screening 2025',
-    activeRoomsCount: 4,
-    tags: ['4K Synced', 'Dolby 5.1', 'English Subtitles', 'Staff Pick'],
+    credit: '© Blender Foundation | mango.blender.org · CC BY 3.0',
+    creditUrl: 'https://mango.blender.org/',
+    tags: ['Open movie', 'CC BY 3.0'],
   },
   {
-    id: 'film_night_coast',
-    title: 'NIGHT COAST',
-    subtitle: 'A Neo-Noir Midnight Run',
-    duration: '10 min 32s',
-    year: 2023,
-    genre: 'Neo-Noir / Thriller',
-    director: 'Arthur Reed',
+    id: 'big-buck-bunny',
+    title: 'Big Buck Bunny',
+    subtitle: 'Animated comedy',
+    duration: '~10 min',
+    year: 2008,
+    genre: 'Animation / Comedy',
+    director: 'Sacha Goedegebure',
     description:
-      'A nocturnal driver takes a solitary run along the serpentine coastal highway through rain and neon street reflections, delivering a locked film canister before first dawn.',
-    posterUrl: '/src/assets/images/poster_coastal_drive_1792164893344.jpg',
+      'A big, gentle rabbit is pushed too far by three mischievous rodents and plans an elaborate revenge.',
     videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-    curatorNote: 'Winner of Best Cinematography · Coastal Student Film Guild',
-    activeRoomsCount: 7,
-    tags: ['1080p Master', 'Original Score', 'Campus Favorite'],
+    credit: '© Blender Foundation | peach.blender.org · CC BY 3.0',
+    creditUrl: 'https://peach.blender.org/',
+    tags: ['Open movie', 'CC BY 3.0'],
   },
   {
-    id: 'film_velocity_runner',
-    title: 'VELOCITY: URBAN RUNNER',
-    subtitle: 'Neo-Tokyo Rooftop Sprint',
-    duration: '14 min 50s',
-    year: 2025,
-    genre: 'Animation / Cyberpunk',
-    director: 'Ren Kurosawa',
+    id: 'sintel',
+    title: 'Sintel',
+    subtitle: 'Fantasy animation',
+    duration: '~15 min',
+    year: 2010,
+    genre: 'Animation / Fantasy',
+    director: 'Colin Levy',
     description:
-      'In a tiered vertical metropolis where data couriers outrun automated enforcement drones, Kai takes on a contraband physical parcel that could unlock the city’s private neural grid.',
-    posterUrl: '/src/assets/images/poster_cyber_courier_1792164894470.jpg',
+      'A young woman travels a harsh fantasy world in search of the baby dragon she once befriended.',
     videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4',
-    curatorNote: 'Hand-drawn animation with electronic analog synthesizer score',
-    activeRoomsCount: 11,
-    tags: ['Ultra HD', 'Stereo Mix', 'Trending Today'],
+    credit: '© Blender Foundation | durian.blender.org · CC BY 3.0',
+    creditUrl: 'https://durian.blender.org/',
+    tags: ['Open movie', 'CC BY 3.0'],
   },
   {
-    id: 'film_glasshouse_echoes',
-    title: 'GLASSHOUSE ECHOES',
-    subtitle: 'Campus Observatory Nights',
-    duration: '15 min 28s',
-    year: 2024,
-    genre: 'Arthouse / Indie',
-    director: 'Elias Thorne',
+    id: 'elephants-dream',
+    title: 'Elephants Dream',
+    subtitle: 'Surreal experimental short',
+    duration: '~11 min',
+    year: 2006,
+    genre: 'Animation / Surreal',
+    director: 'Bassam Kurdali',
     description:
-      'Two university botany researchers spend their final semester archiving rare night-blooming specimens inside the 1920s campus dome while debating their divergent futures.',
-    posterUrl: '/src/assets/images/poster_solaris_drift_1792164877765.jpg',
+      'Two odd companions explore a strange mechanical world in the first open movie made with Blender.',
     videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-    curatorNote: 'Archived by the Campus Film Society · 35mm Remaster',
-    activeRoomsCount: 3,
-    tags: ['Cinema Club', 'Acoustic Score', 'Dialogue Centric'],
+    credit: '© 2006 Blender Foundation / Netherlands Media Art Institute | orange.blender.org · CC BY 2.5',
+    creditUrl: 'https://orange.blender.org/',
+    tags: ['Open movie', 'CC BY 2.5'],
   },
 ];
+
+/**
+ * Builds a library entry for a host-provided video link. The caller must have checked the URL
+ * with isSafeMediaUrl first.
+ */
+export function buildCustomMovie(videoUrl: string, title: string): MovieItem {
+  return {
+    id: `custom_${Date.now()}`,
+    title: sanitizeSingleLine(title, 80) || 'Custom Video',
+    subtitle: 'Direct link',
+    duration: 'Varies',
+    year: new Date().getFullYear(),
+    genre: 'Custom video',
+    director: 'Unknown',
+    description: 'Played directly from a link provided by the room host.',
+    videoUrl: videoUrl.trim(),
+    tags: ['Custom link'],
+  };
+}

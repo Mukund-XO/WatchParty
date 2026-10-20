@@ -1,108 +1,59 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { UserAccount } from '../types';
-import { sanitizeTextInput } from '../utils/security';
+import { randomId, sanitizeSingleLine } from '../utils/security';
 
 interface AuthContextType {
   user: UserAccount;
-  isGuest: boolean;
-  login: (userData?: Partial<UserAccount>) => void;
-  logout: () => void;
-  updateUser: (data: Partial<UserAccount>) => void;
-  setGuestNickname: (name: string) => void;
+  setDisplayName: (name: string) => void;
 }
 
-const DEFAULT_STUDENT_USER: UserAccount = {
-  id: 'usr_mukundan_2026',
-  name: 'Mukundan A.S.',
-  email: 'mukundan.as2026@vitstudent.ac.in',
-  studentId: 'VIT-2026-CS-084',
-  avatar: '',
-  role: 'club_lead',
-  isGuest: false,
-};
+const PROFILE_KEY = 'watchparty_profile';
+// Older versions saved a whole profile (including an email address and student ID) under this key.
+// It is deleted on load so that data does not linger in the browser.
+const LEGACY_PROFILE_KEYS = ['synccinema_user'];
 
-function createGuestUser(customName?: string): UserAccount {
-  const suffix = Math.floor(1000 + Math.random() * 9000);
-  return {
-    id: `guest_${suffix}`,
-    name: customName || `Guest #${suffix}`,
-    email: '',
-    studentId: 'GUEST-ACCESS',
-    avatar: '',
-    role: 'student',
-    isGuest: true,
-  };
+function readSavedName(): string | null {
+  try {
+    LEGACY_PROFILE_KEYS.forEach((key) => localStorage.removeItem(key));
+    const raw = localStorage.getItem(PROFILE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.name === 'string') {
+      return sanitizeSingleLine(parsed.name, 40) || null;
+    }
+  } catch {
+    // Ignore corrupt or blocked storage and fall back to a generated name
+  }
+  return null;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<UserAccount>(() => {
-    const saved = localStorage.getItem('synccinema_user');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed.name === 'string') {
-          return parsed;
-        }
-      } catch {
-        // Fallback to guest
-      }
-    }
-    // Default to a guest user so no forced login is ever required
-    return createGuestUser();
-  });
+  const [user, setUser] = useState<UserAccount>(() => ({
+    // Generated fresh for every tab and page load and never stored. If tabs shared one id,
+    // each tab would treat the others' sync messages as its own and ignore them.
+    id: randomId('user'),
+    name: readSavedName() ?? `Guest ${Math.floor(1000 + Math.random() * 9000)}`,
+    avatar: '',
+  }));
 
+  // Only the display name is remembered between visits.
   useEffect(() => {
     try {
-      localStorage.setItem('synccinema_user', JSON.stringify(user));
+      localStorage.setItem(PROFILE_KEY, JSON.stringify({ name: user.name }));
     } catch {
       // Ignore storage restrictions
     }
-  }, [user]);
+  }, [user.name]);
 
-  const login = (customData?: Partial<UserAccount>) => {
-    const newUser: UserAccount = {
-      ...DEFAULT_STUDENT_USER,
-      ...customData,
-      isGuest: false,
-    };
-    setUser(newUser);
-  };
-
-  const logout = () => {
-    const guest = createGuestUser();
-    setUser(guest);
-  };
-
-  const setGuestNickname = (nickname: string) => {
-    const clean = sanitizeTextInput(nickname, 40);
+  const setDisplayName = (name: string) => {
+    const clean = sanitizeSingleLine(name, 40);
     if (!clean) return;
-    setUser((prev) => ({
-      ...prev,
-      name: clean,
-      isGuest: true,
-    }));
+    setUser((prev) => ({ ...prev, name: clean }));
   };
 
-  const updateUser = (data: Partial<UserAccount>) => {
-    setUser((prev) => ({ ...prev, ...data }));
-  };
-
-  return (
-    <AuthContext.Provider
-      value={{
-        user,
-        isGuest: !!user.isGuest,
-        login,
-        logout,
-        updateUser,
-        setGuestNickname,
-      }}
-    >
-      {children}
-    </AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={{ user, setDisplayName }}>{children}</AuthContext.Provider>;
 };
 
 export const useAuth = () => {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Play,
   Pause,
@@ -19,7 +19,14 @@ import {
 import { WatchRoom, ChatMessage, SyncAction } from '../types';
 import { SyncChannel } from './SyncEngine';
 import { useAuth } from '../context/AuthContext';
-import { sanitizeTextInput, RateLimiter } from '../utils/security';
+import {
+  ALLOWED_REACTIONS,
+  RateLimiter,
+  isSafeMediaUrl,
+  randomId,
+  sanitizeSingleLine,
+  sanitizeTextInput,
+} from '../utils/security';
 
 interface WatchRoomViewProps {
   room: WatchRoom;
@@ -32,6 +39,20 @@ interface FloatingReaction {
   x: number;
 }
 
+const MAX_CHAT_MESSAGES = 500;
+const MAX_NOTES_CHARS = 20000;
+const SEEK_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // Clipboard access is blocked on insecure origins or when permission is denied
+    return false;
+  }
+}
+
 export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom }) => {
   const { user } = useAuth();
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -39,7 +60,7 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(0.85);
+  const [volume] = useState(0.85);
   const [isMuted, setIsMuted] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
@@ -48,89 +69,125 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(room.chatMessages);
   const [floatingReactions, setFloatingReactions] = useState<FloatingReaction[]>([]);
   const [syncStatus, setSyncStatus] = useState<'synced' | 'syncing'>('synced');
-  const [notes, setNotes] = useState<string>(
-    `# ${room.movie.title} Screening Notes\n- Opening sequence establishes quiet mood\n- Sound design shift at 03:40\n- Discussion scheduled right after credits roll`
-  );
+
+  const notesKey = `watchparty_notes_${room.id}`;
+  const [notes, setNotes] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(notesKey);
+      if (saved !== null) return saved.slice(0, MAX_NOTES_CHARS);
+    } catch {
+      // Storage unavailable: start with the default template
+    }
+    return `# ${room.movie.title} Screening Notes\n- Opening sequence establishes quiet mood\n- Sound design shift at 03:40\n- Discussion scheduled right after credits roll`;
+  });
 
   const syncChannelRef = useRef<SyncChannel | null>(null);
-  const isBroadcastingRef = useRef(false);
   const chatLimiterRef = useRef(new RateLimiter(6, 3000));
 
-  useEffect(() => {
-    const handleRemoteAction = (action: SyncAction) => {
-      if (action.senderId === user?.id) return;
+  // Re-check the video URL at the point of use, not only when the room was created.
+  const safeVideoUrl = useMemo(
+    () => (isSafeMediaUrl(room.movie.videoUrl).valid ? room.movie.videoUrl : undefined),
+    [room.movie.videoUrl]
+  );
 
-      if (action.type === 'PLAY') {
-        if (videoRef.current) {
-          isBroadcastingRef.current = true;
-          if (action.currentTime !== undefined && Math.abs(videoRef.current.currentTime - action.currentTime) > 0.3) {
-            videoRef.current.currentTime = action.currentTime;
+  // Notes are saved in this browser, per room
+  useEffect(() => {
+    try {
+      localStorage.setItem(notesKey, notes.slice(0, MAX_NOTES_CHARS));
+    } catch {
+      // Storage full or blocked: notes stay in memory only
+    }
+  }, [notes, notesKey]);
+
+  useEffect(() => {
+    const applyRemoteAction = (action: SyncAction) => {
+      const video = videoRef.current;
+
+      switch (action.type) {
+        case 'PLAY':
+          if (video) {
+            if (action.currentTime !== undefined && Math.abs(video.currentTime - action.currentTime) > 0.3) {
+              video.currentTime = action.currentTime;
+            }
+            // May be rejected by the browser's autoplay policy; the video's own play/pause
+            // events keep the UI state truthful either way.
+            video.play().catch(() => {});
           }
-          videoRef.current.play().catch(() => {});
-          setIsPlaying(true);
-          setTimeout(() => {
-            isBroadcastingRef.current = false;
-          }, 100);
-        }
-      } else if (action.type === 'PAUSE') {
-        if (videoRef.current) {
-          isBroadcastingRef.current = true;
-          if (action.currentTime !== undefined) {
-            videoRef.current.currentTime = action.currentTime;
+          break;
+
+        case 'PAUSE':
+          if (video) {
+            if (action.currentTime !== undefined) {
+              video.currentTime = action.currentTime;
+            }
+            video.pause();
           }
-          videoRef.current.pause();
-          setIsPlaying(false);
-          setTimeout(() => {
-            isBroadcastingRef.current = false;
-          }, 100);
+          break;
+
+        case 'SEEK':
+          if (video && action.currentTime !== undefined) {
+            video.currentTime = action.currentTime;
+            setCurrentTime(action.currentTime);
+          }
+          break;
+
+        case 'SYNC_REQUEST':
+          // A tab that just joined asks for the current state. Answer with ours.
+          if (video && video.readyState >= 1) {
+            channel.broadcast({
+              type: video.paused ? 'PAUSE' : 'PLAY',
+              currentTime: video.currentTime,
+            });
+          }
+          break;
+
+        case 'CHAT': {
+          const incoming = action.payload as ChatMessage | undefined;
+          if (incoming) {
+            setChatMessages((prev) =>
+              prev.some((m) => m.id === incoming.id) ? prev : [...prev, incoming].slice(-MAX_CHAT_MESSAGES)
+            );
+          }
+          break;
         }
-      } else if (action.type === 'SEEK') {
-        if (videoRef.current && action.currentTime !== undefined) {
-          isBroadcastingRef.current = true;
-          videoRef.current.currentTime = action.currentTime;
-          setCurrentTime(action.currentTime);
-          setTimeout(() => {
-            isBroadcastingRef.current = false;
-          }, 100);
-        }
-      } else if (action.type === 'CHAT') {
-        if (action.payload) {
-          setChatMessages((prev) => [...prev, action.payload]);
-        }
-      } else if (action.type === 'REACTION') {
-        if (action.payload?.emoji) {
-          triggerFloatingReaction(action.payload.emoji);
-        }
+
+        case 'REACTION':
+          if (action.payload?.emoji) {
+            triggerFloatingReaction(action.payload.emoji);
+          }
+          break;
       }
     };
 
-    const channel = new SyncChannel(room.id, handleRemoteAction);
+    const channel = new SyncChannel(room.id, applyRemoteAction);
     syncChannelRef.current = channel;
+
+    // If other tabs are already in this room, ask where they are
+    channel.broadcast({ type: 'SYNC_REQUEST' });
 
     return () => {
       channel.destroy();
+      if (syncChannelRef.current === channel) {
+        syncChannelRef.current = null;
+      }
     };
-  }, [room.id, user?.id]);
+  }, [room.id]);
 
   const togglePlayPause = () => {
-    if (!videoRef.current) return;
+    const video = videoRef.current;
+    if (!video) return;
 
-    if (isPlaying) {
-      videoRef.current.pause();
-      setIsPlaying(false);
-      syncChannelRef.current?.broadcast({
-        type: 'PAUSE',
-        senderId: user?.id || 'anon',
-        currentTime: videoRef.current.currentTime,
-      });
+    if (video.paused) {
+      // Only tell the others to play if this tab actually managed to start
+      video
+        .play()
+        .then(() => {
+          syncChannelRef.current?.broadcast({ type: 'PLAY', currentTime: video.currentTime });
+        })
+        .catch(() => {});
     } else {
-      videoRef.current.play().catch(() => {});
-      setIsPlaying(true);
-      syncChannelRef.current?.broadcast({
-        type: 'PLAY',
-        senderId: user?.id || 'anon',
-        currentTime: videoRef.current.currentTime,
-      });
+      video.pause();
+      syncChannelRef.current?.broadcast({ type: 'PAUSE', currentTime: video.currentTime });
     }
   };
 
@@ -147,19 +204,23 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
     }
   };
 
+  // While dragging the slider only this tab moves. The new position is sent once, on release,
+  // so the final position is never lost to the broadcast rate limit.
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newTime = parseFloat(e.target.value);
-    if (videoRef.current) {
+    if (videoRef.current && Number.isFinite(newTime)) {
       videoRef.current.currentTime = newTime;
       setCurrentTime(newTime);
-      syncChannelRef.current?.broadcast({
-        type: 'SEEK',
-        senderId: user?.id || 'anon',
-        currentTime: newTime,
-      });
     }
   };
 
+  const commitSeek = () => {
+    if (videoRef.current) {
+      syncChannelRef.current?.broadcast({ type: 'SEEK', currentTime: videoRef.current.currentTime });
+    }
+  };
+
+  // Clicking a chat timestamp only moves this tab, so one message cannot yank everyone's video around.
   const jumpToTimecode = (seconds: number) => {
     if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return;
     const bounded = Math.max(0, Math.min(duration || 86400, seconds));
@@ -167,20 +228,15 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
     if (videoRef.current) {
       videoRef.current.currentTime = bounded;
       setCurrentTime(bounded);
-      syncChannelRef.current?.broadcast({
-        type: 'SEEK',
-        senderId: user?.id || 'anon',
-        currentTime: bounded,
-      });
     }
   };
 
+  // Pushes THIS tab's position and play state to every other tab in the room
   const forceResync = () => {
     setSyncStatus('syncing');
     if (videoRef.current) {
       syncChannelRef.current?.broadcast({
-        type: isPlaying ? 'PLAY' : 'PAUSE',
-        senderId: user?.id || 'anon',
+        type: videoRef.current.paused ? 'PAUSE' : 'PLAY',
         currentTime: videoRef.current.currentTime,
       });
     }
@@ -188,10 +244,10 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
   };
 
   const triggerFloatingReaction = (emoji: string) => {
-    const safeEmoji = typeof emoji === 'string' ? emoji.slice(0, 8) : '🍿';
+    if (!ALLOWED_REACTIONS.includes(emoji)) return;
     const newReaction: FloatingReaction = {
-      id: Math.random().toString(),
-      emoji: safeEmoji,
+      id: randomId('fx'),
+      emoji,
       x: 20 + Math.random() * 60,
     };
     setFloatingReactions((prev) => [...prev, newReaction]);
@@ -201,12 +257,11 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
   };
 
   const sendReaction = (emoji: string) => {
-    const safeEmoji = typeof emoji === 'string' ? emoji.slice(0, 8) : '🍿';
-    triggerFloatingReaction(safeEmoji);
+    if (!ALLOWED_REACTIONS.includes(emoji)) return;
+    triggerFloatingReaction(emoji);
     syncChannelRef.current?.broadcast({
       type: 'REACTION',
-      senderId: user?.id || 'anon',
-      payload: { emoji: safeEmoji },
+      payload: { emoji },
     });
   };
 
@@ -215,45 +270,46 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
     const cleanText = sanitizeTextInput(chatInput, 300);
     if (!cleanText) return;
 
-    // Rate-limit chat messages to stop message flooding / denial of service
+    // Rate-limit chat messages to stop message flooding
     if (!chatLimiterRef.current.canProceed()) {
       return;
     }
 
     const newMsg: ChatMessage = {
-      id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      senderId: user?.id || 'anon',
-      senderName: sanitizeTextInput(user?.name || 'Campus Viewer', 50),
+      id: randomId('msg'),
+      senderId: user.id,
+      senderName: sanitizeSingleLine(user.name || 'Viewer', 50),
       senderAvatar: '',
       text: cleanText,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       videoTimestamp: Math.max(0, Math.floor(currentTime)),
     };
 
-    setChatMessages((prev) => [...prev, newMsg]);
+    setChatMessages((prev) => [...prev, newMsg].slice(-MAX_CHAT_MESSAGES));
     syncChannelRef.current?.broadcast({
       type: 'CHAT',
-      senderId: user?.id || 'anon',
       payload: newMsg,
     });
     setChatInput('');
   };
 
-  const copyRoomCode = () => {
-    navigator.clipboard.writeText(room.id);
-    setCopiedCode(true);
-    setTimeout(() => setCopiedCode(false), 2000);
+  const copyRoomCode = async () => {
+    if (await copyToClipboard(room.id)) {
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 2000);
+    }
   };
 
-  const copyRoomLink = () => {
+  const copyRoomLink = async () => {
     const url = `${window.location.origin}${window.location.pathname}#room=${room.id}`;
-    navigator.clipboard.writeText(url);
-    setCopiedLink(true);
-    setTimeout(() => setCopiedLink(false), 2000);
+    if (await copyToClipboard(url)) {
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+    }
   };
 
   const formatSeconds = (sec: number) => {
-    if (isNaN(sec)) return '00:00';
+    if (!Number.isFinite(sec)) return '00:00';
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
@@ -324,15 +380,25 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
         {/* Left Column: Synchronized Video Player Area (8 cols) */}
         <div className="lg:col-span-8 flex flex-col gap-4">
           <div className="relative group rounded-3xl bg-black border border-white/10 overflow-hidden shadow-2xl aspect-video flex items-center justify-center">
-            <video
-              ref={videoRef}
-              src={room.movie.videoUrl}
-              onTimeUpdate={handleTimeUpdate}
-              onLoadedMetadata={handleLoadedMetadata}
-              className="w-full h-full object-contain cursor-pointer"
-              onClick={togglePlayPause}
-              playsInline
-            />
+            {safeVideoUrl ? (
+              <video
+                ref={videoRef}
+                src={safeVideoUrl}
+                preload="metadata"
+                onTimeUpdate={handleTimeUpdate}
+                onLoadedMetadata={handleLoadedMetadata}
+                onPlay={() => setIsPlaying(true)}
+                onPause={() => setIsPlaying(false)}
+                onEnded={() => setIsPlaying(false)}
+                className="w-full h-full object-contain cursor-pointer"
+                onClick={togglePlayPause}
+                playsInline
+              />
+            ) : (
+              <p className="px-6 text-center text-xs text-rose-300">
+                This video link was blocked because it is not a safe HTTPS address.
+              </p>
+            )}
 
             {/* Floating Live Reactions */}
             <div className="absolute inset-0 pointer-events-none overflow-hidden">
@@ -356,6 +422,11 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
                 step={0.1}
                 value={currentTime}
                 onChange={handleSeek}
+                onPointerUp={commitSeek}
+                onKeyUp={(e) => {
+                  if (SEEK_KEYS.includes(e.key)) commitSeek();
+                }}
+                aria-label="Seek"
                 className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-[#FAF7F1]"
               />
 
@@ -364,6 +435,7 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
                   <button
                     onClick={togglePlayPause}
                     className="p-2 rounded-xl bg-[#FAF7F1] hover:bg-white text-[#090a0d] font-bold transition-all active:scale-95 cursor-pointer"
+                    aria-label={isPlaying ? 'Pause' : 'Play'}
                   >
                     {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
                   </button>
@@ -377,7 +449,7 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
                   <button
                     onClick={forceResync}
                     className="flex items-center gap-1.5 text-xs text-[#9c978b] hover:text-[#FAF7F1] transition-colors ml-2 cursor-pointer"
-                    title="Force immediate timestamp sync"
+                    title="Send my position and play state to every tab in the room"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
                     <span className="hidden sm:inline">Force Sync</span>
@@ -393,6 +465,7 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
                       }
                     }}
                     className="p-1.5 text-[#9c978b] hover:text-[#FAF7F1] transition-colors cursor-pointer"
+                    aria-label={isMuted ? 'Unmute' : 'Mute'}
                   >
                     {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                   </button>
@@ -408,6 +481,7 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
                       }
                     }}
                     className="p-1.5 text-[#9c978b] hover:text-[#FAF7F1] transition-colors cursor-pointer"
+                    aria-label="Toggle fullscreen"
                   >
                     <Maximize className="w-4 h-4" />
                   </button>
@@ -422,7 +496,7 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
               <span className="text-xs text-[#9c978b] font-medium hidden sm:inline font-topic">
                 Reactions:
               </span>
-              {['🍿', '🔥', '👏', '😱', '❤️'].map((emoji) => (
+              {ALLOWED_REACTIONS.map((emoji) => (
                 <button
                   key={emoji}
                   onClick={() => sendReaction(emoji)}
@@ -435,7 +509,7 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
 
             <div className="flex items-center gap-2 text-xs text-[#9c978b]">
               <ShieldCheck className="w-3.5 h-3.5 text-[#FAF7F1]" />
-              <span>Real-time sync active</span>
+              <span>Syncs across tabs in this browser</span>
             </div>
           </div>
         </div>
@@ -490,7 +564,7 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
                             <button
                               onClick={() => jumpToTimecode(msg.videoTimestamp!)}
                               className="text-[#FAF7F1] hover:underline cursor-pointer"
-                              title="Jump video to this timestamp"
+                              title="Jump this tab's video to this timestamp"
                             >
                               [{formatSeconds(msg.videoTimestamp)}]
                             </button>
@@ -512,6 +586,7 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
                   type="text"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
+                  maxLength={300}
                   placeholder="Note in margins... (auto-tags time)"
                   className="flex-1 px-3 py-2 rounded-xl bg-black/50 border border-white/10 text-xs text-[#FAF7F1] focus:outline-none focus:border-[#FAF7F1]"
                 />
@@ -519,23 +594,24 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
                   type="submit"
                   className="p-2 rounded-xl bg-[#FAF7F1] hover:bg-white text-[#090a0d] transition-colors cursor-pointer"
                   title="Send message"
+                  aria-label="Send message"
                 >
                   <Send className="w-3.5 h-3.5" />
                 </button>
               </form>
             </div>
           ) : (
-            /* Tab Content 2: Collaborative Screening Notes */
+            /* Tab Content 2: Screening Notes (saved in this browser, per room) */
             <div className="flex-1 flex flex-col p-4 relative notebook-ruled-lines">
               <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/[0.06]">
                 <span className="font-topic text-[11px] font-mono text-[#FAF7F1] uppercase tracking-wide">
                   Screening Journal Pad
                 </span>
-                <span className="text-[11px] text-[#9c978b]">Auto-saved locally</span>
+                <span className="text-[11px] text-[#9c978b]">Saved in this browser</span>
               </div>
               <textarea
                 value={notes}
-                onChange={(e) => setNotes(e.target.value)}
+                onChange={(e) => setNotes(e.target.value.slice(0, MAX_NOTES_CHARS))}
                 rows={14}
                 className="w-full flex-1 bg-transparent border-0 text-xs text-[#FAF7F1] font-mono leading-relaxed resize-none focus:outline-none custom-scrollbar p-1"
                 placeholder="Type your film critique, timestamps, and camera analysis..."

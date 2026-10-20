@@ -5,7 +5,6 @@ import { MovieItem } from '../types';
 
 interface ListingsGridProps {
   onSelectMovieToHost: (movie: MovieItem) => void;
-  onQuickJoinDemo?: (code: string) => void;
 }
 
 export const ListingsGrid: React.FC<ListingsGridProps> = ({
@@ -126,6 +125,22 @@ export const ListingsGrid: React.FC<ListingsGridProps> = ({
               <div className="mt-2 text-[11px] font-mono text-[#9c978b]">
                 Directed by <span className="text-[#FAF7F1]">{movie.director}</span>
               </div>
+              {movie.credit && (
+                <div className="mt-1 text-[10px] leading-snug text-[#9c978b]/80">
+                  {movie.creditUrl ? (
+                    <a
+                      href={movie.creditUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:underline"
+                    >
+                      {movie.credit}
+                    </a>
+                  ) : (
+                    movie.credit
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Bottom Actions Row */}
@@ -179,6 +194,9 @@ export const ListingsGrid: React.FC<ListingsGridProps> = ({
             <div className="p-4 flex items-center justify-between border-t border-white/[0.08]">
               <div className="text-xs text-[#9c978b]">
                 Directed by <span className="text-[#FAF7F1]">{previewMovie.director}</span>
+                {previewMovie.credit && (
+                  <div className="mt-1 text-[10px] leading-snug text-[#9c978b]/80">{previewMovie.credit}</div>
+                )}
               </div>
               <button
                 onClick={() => {

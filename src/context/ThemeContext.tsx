@@ -2,6 +2,12 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { AccentPreset, TopBarTheme } from '../types';
 
 export const DEFAULT_ACCENT = '#FAF7F1'; // Cream / Off-White
+const DEFAULT_TOPBAR_BG = '#0c0e12';
+
+// Anything read from storage or typed by the user must match this before it reaches a CSS variable.
+const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+const isHexColor = (value: unknown): value is string =>
+  typeof value === 'string' && HEX_COLOR.test(value);
 
 export const ACCENT_PRESETS: AccentPreset[] = [
   {
@@ -106,15 +112,12 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Default accent color is strictly Cream / Off-White #FAF7F1
   const [accentColor, setAccentColorState] = useState<string>(() => {
     const saved = localStorage.getItem('watchparty_accent_color');
-    if (saved && /^#[0-9A-Fa-f]{3,6}$/.test(saved)) {
-      return saved;
-    }
-    return DEFAULT_ACCENT;
+    return isHexColor(saved) ? saved : DEFAULT_ACCENT;
   });
 
   const [topBarColor, setTopBarColorState] = useState<string>(() => {
     const saved = localStorage.getItem('watchparty_topbar_bg');
-    return saved || '#0c0e12';
+    return isHexColor(saved) ? saved : DEFAULT_TOPBAR_BG;
   });
 
   const contrastColor = getContrastColor(accentColor);
@@ -138,11 +141,11 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [accentColor, contrastColor, topBarColor]);
 
   const setAccentColor = (hex: string) => {
-    setAccentColorState(hex);
+    if (isHexColor(hex)) setAccentColorState(hex);
   };
 
   const setTopBarColor = (hex: string) => {
-    setTopBarColorState(hex);
+    if (isHexColor(hex)) setTopBarColorState(hex);
   };
 
   const applyPreset = (presetId: string) => {

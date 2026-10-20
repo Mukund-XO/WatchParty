@@ -1,11 +1,8 @@
 export interface UserAccount {
+  /** Random per-tab id, regenerated on every page load. Never persisted. */
   id: string;
   name: string;
-  email: string;
-  studentId: string;
   avatar: string;
-  role: 'student' | 'club_lead' | 'host';
-  isGuest: boolean;
 }
 
 export interface MovieItem {
@@ -17,20 +14,12 @@ export interface MovieItem {
   genre: string;
   director: string;
   description: string;
-  posterUrl: string;
+  posterUrl?: string;
   videoUrl: string;
-  curatorNote?: string;
-  activeRoomsCount: number;
+  /** Attribution line shown next to the film (copyright holder and licence). */
+  credit?: string;
+  creditUrl?: string;
   tags: string[];
-}
-
-export interface RoomViewer {
-  id: string;
-  name: string;
-  avatar: string;
-  isHost: boolean;
-  joinedAt: number;
-  pingMs: number;
 }
 
 export interface ChatMessage {
@@ -47,19 +36,13 @@ export interface ChatMessage {
 export interface WatchRoom {
   id: string; // 6-digit code
   title: string;
-  hostId: string;
   hostName: string;
   movie: MovieItem;
-  isPlaying: boolean;
-  currentTime: number;
-  lastUpdated: number;
-  viewers: RoomViewer[];
   chatMessages: ChatMessage[];
-  isHost: boolean;
 }
 
 export interface SyncAction {
-  type: 'PLAY' | 'PAUSE' | 'SEEK' | 'CHAT' | 'REACTION' | 'PING';
+  type: 'PLAY' | 'PAUSE' | 'SEEK' | 'CHAT' | 'REACTION' | 'PING' | 'SYNC_REQUEST';
   roomId: string;
   senderId: string;
   currentTime?: number;
@@ -83,4 +66,3 @@ export interface AccentPreset {
   hex: string;
   isDefault?: boolean;
 }
-

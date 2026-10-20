@@ -9,7 +9,7 @@ export const HowSyncWorks: React.FC = () => {
           How Synchronized Streaming Works
         </h2>
         <p className="text-sm text-[#9c978b] mt-3 leading-relaxed">
-          Watch Party coordinates timeline state across devices using lightweight peer events, ensuring every member in your room hears dialogue and catches plot twists at the exact same moment.
+          Watch Party broadcasts play, pause and seek events between the open tabs of a room using the browser's BroadcastChannel API. There is no server yet, so rooms do not reach other browsers or devices.
         </p>
       </div>
 
@@ -20,7 +20,7 @@ export const HowSyncWorks: React.FC = () => {
           </div>
           <h3 className="font-topic text-base font-bold text-[#FAF7F1]">1. Six-Digit Room Pass</h3>
           <p className="text-xs text-[#9c978b] leading-relaxed">
-            Every room generates a 6-digit key. Share it with your friends or dorm mates to join instantly with no lengthy URLs.
+            Every room gets a random 6-digit key. Enter it, or open the invite link, in another tab of this browser to join.
           </p>
         </div>
 
@@ -28,9 +28,9 @@ export const HowSyncWorks: React.FC = () => {
           <div className="w-10 h-10 rounded-xl bg-white/[0.05] border border-white/10 flex items-center justify-center text-[#FAF7F1]">
             <Wifi className="w-5 h-5" />
           </div>
-          <h3 className="font-topic text-base font-bold text-[#FAF7F1]">2. Sub-Millisecond Peer Lock</h3>
+          <h3 className="font-topic text-base font-bold text-[#FAF7F1]">2. Shared Playback Events</h3>
           <p className="text-xs text-[#9c978b] leading-relaxed">
-            Play, pause, and seek events broadcast instantly across tabs and devices with auto-resync if any stream drifts.
+            Play, pause and seek events are sent to every open tab in the room. A tab that joins late asks the others for their current position.
           </p>
         </div>
 
@@ -53,7 +53,7 @@ export const HowSyncWorks: React.FC = () => {
           </div>
           <div className="text-xs text-[#9c978b]">
             <span className="font-semibold text-[#FAF7F1]">Try it right now: </span>
-            Launch a watch room, copy the 6-digit code or link, open it in another browser tab, and press play! Both tabs will play and pause together in lockstep.
+            Launch a watch room, copy the 6-digit code or link, open it in another tab of the same browser, and press play. Both tabs will play and pause together. A different browser, a private window or another device will not see the room.
           </div>
         </div>
       </div>

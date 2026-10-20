@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { X, Film, Check, Link as LinkIcon, Play, Radio } from 'lucide-react';
-import { MOVIES_CATALOG } from '../data/movies';
+import { MOVIES_CATALOG, buildCustomMovie } from '../data/movies';
 import { MovieItem } from '../types';
 import { generateRoomCode } from './SyncEngine';
 import { useAuth } from '../context/AuthContext';
-import { isSafeMediaUrl, sanitizeTextInput } from '../utils/security';
+import { isSafeMediaUrl, sanitizeSingleLine } from '../utils/security';
 
 interface CreateRoomModalProps {
   isOpen: boolean;
@@ -50,24 +50,11 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({
         return;
       }
 
-      finalMovie = {
-        id: `custom_${Date.now()}`,
-        title: sanitizeTextInput(customTitle.trim(), 80) || 'Custom Video Stream',
-        subtitle: 'Direct Link Stream',
-        duration: 'Live / Variable',
-        year: new Date().getFullYear(),
-        genre: 'User Stream',
-        director: sanitizeTextInput(user?.name || 'Campus Host', 50),
-        description: 'Streamed via verified direct media URL during campus watch party session.',
-        posterUrl: selectedMovie.posterUrl,
-        videoUrl: customUrl.trim(),
-        activeRoomsCount: 1,
-        tags: ['Verified Stream', 'Direct Sync'],
-      };
+      finalMovie = buildCustomMovie(customUrl, customTitle);
     }
 
-    const cleanTitle = sanitizeTextInput(roomTitle, 80) || `${finalMovie.title} Watch Party`;
-    const cleanHostName = sanitizeTextInput(customHostName, 40) || user?.name || 'Guest';
+    const cleanTitle = sanitizeSingleLine(roomTitle, 80) || `${finalMovie.title} Watch Party`;
+    const cleanHostName = sanitizeSingleLine(customHostName, 40) || user?.name || 'Guest';
 
     onRoomCreated({
       code: generatedCode,
@@ -206,6 +193,9 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({
                       {urlError}
                     </p>
                   )}
+                  <p className="text-[11px] text-[#9c978b] mt-1.5">
+                    Everyone who opens the room loads this video straight from that site, which can see their IP address. Only use sources you trust.
+                  </p>
                 </div>
                 <div>
                   <label className="block text-xs text-[#9c978b] mb-1">
@@ -227,8 +217,8 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({
           <div className="p-4 rounded-2xl bg-white/[0.02] border border-white/10 flex items-start gap-3">
             <Radio className="w-4 h-4 text-[#FAF7F1] shrink-0 mt-0.5" />
             <div className="text-xs text-[#9c978b] leading-relaxed">
-              <span className="font-semibold text-[#FAF7F1]">Host-Synchronized Playback:</span>{' '}
-              All room participants stay locked to your playback controls in real-time.
+              <span className="font-semibold text-[#FAF7F1]">Shared Playback:</span>{' '}
+              Anyone in the room can play, pause or seek and everyone follows. For now, sync works between tabs of this browser.
             </div>
           </div>
         </div>

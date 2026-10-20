@@ -1,83 +1,96 @@
-import { SyncAction } from '../types';
-import { validateSyncAction, RateLimiter } from '../utils/security';
+import type { SyncAction } from '../types';
+import { validateSyncAction, RateLimiter, randomId } from '../utils/security';
 
+type OutgoingAction = Omit<SyncAction, 'roomId' | 'timestamp' | 'senderId'>;
+
+/**
+ * Syncs one room between tabs of the same browser using BroadcastChannel (with a localStorage
+ * "storage" event fallback for old browsers). There is no network transport, so it does not
+ * reach other browsers or devices.
+ */
 export class SyncChannel {
+  /** Unique per channel instance. Used as the sender id and to ignore our own messages. */
+  public readonly clientId = randomId('client');
+
   private channel: BroadcastChannel | null = null;
   private roomId: string;
   private onActionCallback: (action: SyncAction) => void;
   private storageKey: string;
+  private usingStorageFallback = false;
   private broadcastLimiter: RateLimiter;
+  private incomingLimiter: RateLimiter;
 
   constructor(roomId: string, onAction: (action: SyncAction) => void) {
     this.roomId = roomId;
     this.onActionCallback = onAction;
-    this.storageKey = `synccinema_event_${roomId}`;
-    // Limit broadcasts to at most 20 actions per 1 second to prevent sync-loop floods
+    this.storageKey = `watchparty_event_${roomId}`;
+    // Limit broadcasts to at most 20 actions per second to prevent sync-loop floods
     this.broadcastLimiter = new RateLimiter(20, 1000);
+    // Drop floods from other tabs instead of re-rendering for every message
+    this.incomingLimiter = new RateLimiter(60, 1000);
 
     if (typeof BroadcastChannel !== 'undefined') {
       try {
-        this.channel = new BroadcastChannel(`synccinema_room_${roomId}`);
-        this.channel.onmessage = (event: MessageEvent) => {
-          // Validate incoming schema and origin
-          const validAction = validateSyncAction(event.data, this.roomId);
-          if (validAction) {
-            this.onActionCallback(validAction);
-          }
-        };
+        this.channel = new BroadcastChannel(`watchparty_room_${roomId}`);
+        this.channel.onmessage = (event: MessageEvent) => this.receive(event.data);
       } catch {
-        // Fallback gracefully without verbose errors
+        this.channel = null;
       }
     }
 
-    // Storage fallback for cross-tab sync
-    window.addEventListener('storage', this.handleStorageEvent);
+    // The storage event is only a fallback. Using it alongside BroadcastChannel would deliver
+    // every message twice.
+    if (!this.channel) {
+      this.usingStorageFallback = true;
+      window.addEventListener('storage', this.handleStorageEvent);
+    }
+  }
+
+  private receive(raw: unknown) {
+    if (!this.incomingLimiter.canProceed()) return;
+
+    const action = validateSyncAction(raw, this.roomId);
+    if (!action || action.senderId === this.clientId) return;
+
+    this.onActionCallback(action);
   }
 
   private handleStorageEvent = (event: StorageEvent) => {
-    if (event.key === this.storageKey && event.newValue) {
-      try {
-        // Limit maximum payload size (prevent oversized localStorage attacks)
-        if (event.newValue.length > 8192) return;
+    if (event.key !== this.storageKey || !event.newValue) return;
+    // Limit maximum payload size (prevent oversized localStorage attacks)
+    if (event.newValue.length > 8192) return;
 
-        const parsed = JSON.parse(event.newValue);
-        const validAction = validateSyncAction(parsed, this.roomId);
-        if (validAction) {
-          this.onActionCallback(validAction);
-        }
-      } catch {
-        // Suppress raw error traces from malformed input
-      }
+    try {
+      this.receive(JSON.parse(event.newValue));
+    } catch {
+      // Suppress raw error traces from malformed input
     }
   };
 
-  public broadcast(action: Omit<SyncAction, 'roomId' | 'timestamp'>) {
-    // Check rate limit
+  /** Returns false if the message was dropped by the rate limiter. */
+  public broadcast(action: OutgoingAction): boolean {
     if (!this.broadcastLimiter.canProceed()) {
-      return;
+      return false;
     }
 
     const fullAction: SyncAction = {
       ...action,
       roomId: this.roomId,
+      senderId: this.clientId,
       timestamp: Date.now(),
     };
 
-    // 1. BroadcastChannel
-    if (this.channel) {
-      try {
-        this.channel.postMessage(fullAction);
-      } catch {
-        // Non-blocking
-      }
-    }
-
-    // 2. Storage event
     try {
-      localStorage.setItem(this.storageKey, JSON.stringify(fullAction));
+      if (this.channel) {
+        this.channel.postMessage(fullAction);
+      } else {
+        localStorage.setItem(this.storageKey, JSON.stringify(fullAction));
+      }
     } catch {
-      // Storage quota or restricted environment
+      // Storage quota, closed channel or restricted environment
+      return false;
     }
+    return true;
   }
 
   public destroy() {
@@ -89,21 +102,22 @@ export class SyncChannel {
       }
       this.channel = null;
     }
-    window.removeEventListener('storage', this.handleStorageEvent);
+    if (this.usingStorageFallback) {
+      window.removeEventListener('storage', this.handleStorageEvent);
+    }
   }
 }
 
 /**
- * Generate cryptographically secure 6-digit room code using crypto.getRandomValues
+ * Generates a random 6-digit room code (100000-999999) with the Web Crypto API.
+ * Values from the uneven top sliver of the 32-bit range are rejected so every code is equally likely.
  */
 export function generateRoomCode(): string {
-  try {
-    const array = new Uint32Array(1);
-    window.crypto.getRandomValues(array);
-    const code = 100000 + (array[0] % 900000);
-    return code.toString();
-  } catch {
-    // Fallback if crypto is unavailable
-    return Math.floor(100000 + Math.random() * 900000).toString();
-  }
+  const range = 900000;
+  const limit = Math.floor(0x100000000 / range) * range;
+  const buffer = new Uint32Array(1);
+  do {
+    globalThis.crypto.getRandomValues(buffer);
+  } while (buffer[0] >= limit);
+  return String(100000 + (buffer[0] % range));
 }

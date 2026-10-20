@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { X, User, Palette, Check, RefreshCw, RotateCcw, Sparkles } from 'lucide-react';
+import { X, User, Palette, Check, RotateCcw, Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme, DEFAULT_ACCENT } from '../context/ThemeContext';
-import { sanitizeTextInput } from '../utils/security';
+import { sanitizeSingleLine } from '../utils/security';
 
 interface AccountModalProps {
   isOpen: boolean;
@@ -10,7 +10,7 @@ interface AccountModalProps {
 }
 
 export const AccountModal: React.FC<AccountModalProps> = ({ isOpen, onClose }) => {
-  const { user, isGuest, login, logout, setGuestNickname } = useAuth();
+  const { user, setDisplayName } = useAuth();
   const { accentColor, setAccentColor, applyPreset, resetToDefault, presets } = useTheme();
 
   const [customHex, setCustomHex] = useState(accentColor);
@@ -21,16 +21,16 @@ export const AccountModal: React.FC<AccountModalProps> = ({ isOpen, onClose }) =
 
   const handleCustomColorSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (/^#[0-9A-Fa-f]{6}$/.test(customHex) || /^#[0-9A-Fa-f]{3}$/.test(customHex)) {
+    if (/^#(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})$/.test(customHex)) {
       setAccentColor(customHex);
     }
   };
 
   const handleSaveNickname = (e: React.FormEvent) => {
     e.preventDefault();
-    const clean = sanitizeTextInput(nicknameInput, 40);
+    const clean = sanitizeSingleLine(nicknameInput, 40);
     if (clean) {
-      setGuestNickname(clean);
+      setDisplayName(clean);
       setSavedNameToast(true);
       setTimeout(() => setSavedNameToast(false), 2000);
     }
@@ -49,7 +49,7 @@ export const AccountModal: React.FC<AccountModalProps> = ({ isOpen, onClose }) =
           <div className="flex items-center gap-2.5">
             <User className="w-4 h-4 text-[#FAF7F1]" />
             <h2 className="font-topic text-sm font-semibold text-[#FAF7F1] tracking-wide">
-              {isGuest ? 'Guest Profile & Website Accent' : 'Campus Account & Website Accent'}
+              Profile & Website Accent
             </h2>
           </div>
           <button
@@ -62,109 +62,50 @@ export const AccountModal: React.FC<AccountModalProps> = ({ isOpen, onClose }) =
         </div>
 
         <div className="p-6 space-y-6 max-h-[80vh] overflow-y-auto custom-scrollbar">
-          {/* Identity & Guest Access Section */}
+          {/* Display name */}
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <p className="font-topic text-xs font-medium text-[#9c978b] tracking-wider uppercase">
-                {isGuest ? 'Guest Access (No Login Required)' : 'Student Account'}
-              </p>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-white/[0.06] text-[#FAF7F1] border border-white/10">
-                {isGuest ? 'Free Guest Access' : 'Verified Student'}
-              </span>
+            <p className="font-topic text-xs font-medium text-[#9c978b] tracking-wider uppercase">
+              Display name
+            </p>
+
+            <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-white/[0.06] border border-white/10 flex items-center justify-center text-[#FAF7F1] font-bold text-xs">
+                  {user.name.slice(0, 2).toUpperCase()}
+                </div>
+                <div>
+                  <h3 className="font-topic text-sm font-semibold text-[#FAF7F1]">{user.name}</h3>
+                  <p className="text-[11px] text-[#9c978b]">
+                    No account needed. Your name is saved only in this browser.
+                  </p>
+                </div>
+              </div>
+
+              <form onSubmit={handleSaveNickname} className="space-y-1.5 pt-1">
+                <label className="block text-[11px] text-[#9c978b]">
+                  Customize your display name (appears in chat & rooms)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={nicknameInput}
+                    onChange={(e) => setNicknameInput(e.target.value)}
+                    maxLength={40}
+                    placeholder="e.g. Alex, Cinephile42"
+                    className="flex-1 px-3 py-1.5 rounded-xl bg-black/40 border border-white/10 text-xs text-[#FAF7F1] focus:outline-none focus:border-[var(--accent)]"
+                  />
+                  <button
+                    type="submit"
+                    className="px-3 py-1.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] text-xs font-medium text-[#FAF7F1] border border-white/10 transition-colors cursor-pointer shrink-0 font-topic"
+                  >
+                    {savedNameToast ? 'Saved!' : 'Save Name'}
+                  </button>
+                </div>
+              </form>
             </div>
-
-            {isGuest ? (
-              /* Guest Card */
-              <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-white/[0.06] border border-white/10 flex items-center justify-center text-[#FAF7F1] font-bold text-xs">
-                      {user.name.slice(0, 2).toUpperCase()}
-                    </div>
-                    <div>
-                      <h3 className="font-topic text-sm font-semibold text-[#FAF7F1]">{user.name}</h3>
-                      <p className="text-[11px] text-[#9c978b]">Full access to host & join watch rooms</p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Nickname Editor for Guests */}
-                <form onSubmit={handleSaveNickname} className="space-y-1.5 pt-1">
-                  <label className="block text-[11px] text-[#9c978b]">
-                    Customize Your Display Name (appears in chat & rooms)
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={nicknameInput}
-                      onChange={(e) => setNicknameInput(e.target.value)}
-                      maxLength={40}
-                      placeholder="e.g. Alex, Cinephile42"
-                      className="flex-1 px-3 py-1.5 rounded-xl bg-black/40 border border-white/10 text-xs text-[#FAF7F1] focus:outline-none focus:border-[var(--accent)]"
-                    />
-                    <button
-                      type="submit"
-                      className="px-3 py-1.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] text-xs font-medium text-[#FAF7F1] border border-white/10 transition-colors cursor-pointer shrink-0 font-topic"
-                    >
-                      {savedNameToast ? 'Saved!' : 'Save Name'}
-                    </button>
-                  </div>
-                </form>
-
-                {/* Optional Student Login Switch */}
-                <div className="pt-2 border-t border-white/[0.05] flex items-center justify-between text-xs">
-                  <span className="text-[#9c978b] text-[11px]">Optional: Have a campus ID?</span>
-                  <button
-                    onClick={() => login()}
-                    className="text-[#FAF7F1] hover:underline text-[11px] font-medium transition-colors cursor-pointer"
-                  >
-                    Log in as Mukundan A.S. →
-                  </button>
-                </div>
-              </div>
-            ) : (
-              /* Verified Student Account Card */
-              <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06] space-y-3.5">
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-xl bg-white/[0.06] border border-white/10 flex items-center justify-center text-[#FAF7F1] font-bold text-sm">
-                      {user.name.slice(0, 2).toUpperCase()}
-                    </div>
-                    <div>
-                      <h3 className="font-topic text-sm font-semibold text-[#FAF7F1]">{user.name}</h3>
-                      <p className="text-xs text-[#9c978b]">{user.email}</p>
-                    </div>
-                  </div>
-                  <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-white/[0.05] text-[#FAF7F1] border border-white/10">
-                    VIT Student
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 pt-2 border-t border-white/[0.05] text-xs">
-                  <div>
-                    <span className="text-[#9c978b]">Student ID:</span>{' '}
-                    <span className="font-mono text-[#FAF7F1]">{user.studentId}</span>
-                  </div>
-                  <div>
-                    <span className="text-[#9c978b]">Sync Network:</span>{' '}
-                    <span className="text-[#FAF7F1]">Watch Party Node</span>
-                  </div>
-                </div>
-
-                <div className="pt-2 flex gap-2">
-                  <button
-                    onClick={() => logout()}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-[#9c978b] hover:text-[#FAF7F1] hover:bg-white/[0.05] rounded-lg transition-colors border border-white/[0.08] cursor-pointer"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>Switch to Guest Mode</span>
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
 
-          {/* Website Accent Color Customization (Reused from Top Bar Color Option) */}
+          {/* Website Accent Color Customization */}
           <div className="space-y-3 pt-3 border-t border-white/[0.08]">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">

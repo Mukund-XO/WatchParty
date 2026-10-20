@@ -4,7 +4,8 @@ import { validateRoomCode } from '../utils/security';
 
 interface HeroSectionProps {
   onCreateRoom: () => void;
-  onJoinRoom: (code: string) => void;
+  /** Returns an error message to display, or null when the room was joined. */
+  onJoinRoom: (code: string) => string | null;
   onScrollToListings: () => void;
 }
 
@@ -65,14 +66,10 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
     }
     setIsJoining(true);
     setTimeout(() => {
-      onJoinRoom(validCode);
+      const error = onJoinRoom(validCode);
+      if (error) setErrorMsg(error);
       setIsJoining(false);
     }, 200);
-  };
-
-  const fillQuickCode = (code: string) => {
-    setDigits(code.split(''));
-    setErrorMsg('');
   };
 
   return (
@@ -87,8 +84,8 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
         </h1>
 
         <p className="text-base sm:text-lg text-[#9c978b] leading-relaxed max-w-2xl mx-auto font-normal">
-          Real-time synchronized playback, shared margin reactions, and zero drift.
-          Host a screening room or punch in a 6-digit code to join in lockstep.
+          Synchronized playback, shared reactions, and timestamped margin notes.
+          Host a screening room or punch in a 6-digit code to join.
         </p>
       </div>
 
@@ -112,8 +109,8 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
               Create a Watch Room
             </h2>
             <p className="text-sm text-[#9c978b] leading-relaxed mb-6">
-              Host a screening from the film library or stream your own video file.
-              Generate a unique 6-digit room pass to invite friends.
+              Host a screening from the film library or paste your own video link.
+              Generate a random 6-digit room pass to share with other tabs.
             </p>
           </div>
 
@@ -131,7 +128,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
               <ArrowRight className="w-4 h-4 ml-1" />
             </button>
             <div className="flex items-center justify-between text-[11px] text-[#9c978b] px-1 font-mono">
-              <span>Host Controls · Auto-Sync</span>
+              <span>Shared Controls · Auto-Sync</span>
               <span className="text-[#FAF7F1]">Instant 6-Digit Pass</span>
             </div>
           </div>
@@ -148,7 +145,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
               Join with 6-Digit Code
             </h2>
             <p className="text-sm text-[#9c978b] leading-relaxed mb-4">
-              Enter the 6-digit passkey shared by your host to jump straight into the live stream.
+              Enter the 6-digit passkey of a room created in this browser, for example from another tab, to join it.
             </p>
 
             {/* 6-Digit Input Grid */}
@@ -193,17 +190,9 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
               <span>{isJoining ? 'Connecting to Room...' : 'Join Screening Room'}</span>
             </button>
 
-            {/* Quick Demo Code Suggestion */}
-            <div className="flex items-center justify-between text-[11px] text-[#9c978b] px-1 font-mono">
-              <span>Have a passkey?</span>
-              <button
-                onClick={() => fillQuickCode('842910')}
-                className="hover:underline underline-offset-2 cursor-pointer transition-colors"
-                style={{ color: 'var(--accent, #FAF7F1)' }}
-              >
-                Use Active Demo: 842-910
-              </button>
-            </div>
+            <p className="text-[11px] text-[#9c978b] px-1 font-mono">
+              Rooms work between tabs of one browser. Cross-device rooms need a server.
+            </p>
           </div>
         </div>
       </div>

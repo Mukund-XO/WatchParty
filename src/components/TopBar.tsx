@@ -16,7 +16,7 @@ interface TopBarProps {
 export const TopBar: React.FC<TopBarProps> = ({
   onNavigateHome,
 }) => {
-  const { user, isGuest } = useAuth();
+  const { user } = useAuth();
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
 
   return (
@@ -45,8 +45,8 @@ export const TopBar: React.FC<TopBarProps> = ({
               style={{
                 borderColor: 'var(--accent-subtle, rgba(250, 247, 241, 0.2))',
               }}
-              aria-label={isGuest ? 'Guest Profile & Website Accent' : 'Account Details & Website Accent'}
-              title="Account & Website Accent Settings"
+              aria-label="Profile & Website Accent"
+              title="Profile & Website Accent Settings"
             >
               <User className="w-3.5 h-3.5 text-[#FAF7F1]/80" />
               <span className="text-[#FAF7F1]">{user?.name || 'Guest'}</span>

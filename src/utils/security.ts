@@ -1,11 +1,48 @@
-import { SyncAction, ChatMessage } from '../types';
+import type { SyncAction, ChatMessage } from '../types';
+
+/** The only reactions a peer is allowed to send. Anything else is dropped. */
+export const ALLOWED_REACTIONS: readonly string[] = ['🍿', '🔥', '👏', '😱', '❤️'];
+
+/** Sync messages whose timestamp is further than this from the local clock are ignored (replay protection). */
+const MAX_MESSAGE_AGE_MS = 2 * 60 * 1000;
+
+const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
- * Validates whether a user-provided media stream URL is safe to load in a video element.
- * Blocks dangerous protocols (javascript:, data:, file:) and private network probing.
+ * Random, URL-safe identifier such as "msg_3f2b...". Uses the Web Crypto API when available.
+ */
+export function randomId(prefix = 'id'): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return `${prefix}_${crypto.randomUUID()}`;
+    }
+    if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+      const bytes = new Uint8Array(12);
+      crypto.getRandomValues(bytes);
+      return `${prefix}_${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+    }
+  } catch {
+    // fall through to the non-crypto fallback below
+  }
+  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
+const BLOCKED_HOST_SUFFIXES = ['.local', '.localhost', '.internal', '.lan', '.intranet', '.corp', '.home', '.home.arpa'];
+
+/**
+ * Checks whether a user-provided video URL is acceptable to load in a <video> element.
+ *
+ * Accepts only https:// URLs on public-looking domain names: no credentials in the URL,
+ * no raw IP addresses (the URL parser also normalises decimal/hex/octal forms such as
+ * https://2130706433 to 127.0.0.1, so those are caught too), and no single-label or
+ * internal-style hostnames.
+ *
+ * Limits: this runs in the browser and cannot resolve DNS, so a public name that points at a
+ * private address is not detected. It also cannot stop the video host from seeing the IP
+ * address of every viewer who loads the video; only use sources you trust.
  */
 export function isSafeMediaUrl(rawUrl: string): { valid: boolean; error?: string } {
-  if (!rawUrl || typeof rawUrl !== 'string') {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
     return { valid: false, error: 'URL cannot be empty.' };
   }
 
@@ -15,60 +52,52 @@ export function isSafeMediaUrl(rawUrl: string): { valid: boolean; error?: string
     return { valid: false, error: 'URL exceeds maximum allowable length of 2048 characters.' };
   }
 
-  // Explicitly block dangerous scheme prefixes before URL parsing
-  const lower = trimmed.toLowerCase();
-  if (
-    lower.startsWith('javascript:') ||
-    lower.startsWith('data:') ||
-    lower.startsWith('vbscript:') ||
-    lower.startsWith('file:') ||
-    lower.startsWith('blob:')
-  ) {
-    return { valid: false, error: 'Unsafe URL protocol detected. Only HTTPS streams are permitted.' };
-  }
-
+  let parsed: URL;
   try {
-    const parsed = new URL(trimmed);
-
-    // Enforce HTTPS in production; allow HTTP only on localhost during local dev
-    const isLocalhost =
-      parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
-
-    if (parsed.protocol !== 'https:' && !(isLocalhost && parsed.protocol === 'http:')) {
-      return { valid: false, error: 'Only secure HTTPS video URLs are supported.' };
-    }
-
-    // SSRF / Private network protection: Block internal cloud metadata and private IP ranges
-    const host = parsed.hostname.toLowerCase();
-    if (
-      !isLocalhost &&
-      (host === '169.254.169.254' || // AWS/GCP metadata service
-        host === 'metadata.google.internal' ||
-        host.startsWith('10.') ||
-        host.startsWith('192.168.') ||
-        /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host) ||
-        host === '0.0.0.0')
-    ) {
-      return { valid: false, error: 'Access to private internal network addresses is restricted.' };
-    }
-
-    return { valid: true };
+    parsed = new URL(trimmed);
   } catch {
     return { valid: false, error: 'Invalid URL format. Please provide a valid web address.' };
   }
+
+  if (parsed.protocol !== 'https:') {
+    return { valid: false, error: 'Only secure HTTPS video URLs are supported.' };
+  }
+
+  if (parsed.username || parsed.password) {
+    return { valid: false, error: 'URLs with embedded credentials are not allowed.' };
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  const isIpLiteral = host.startsWith('[') || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host);
+  const isInternalName = !host.includes('.') || BLOCKED_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
+
+  if (isIpLiteral || isInternalName) {
+    return { valid: false, error: 'Use a public website address (no IP addresses or internal hostnames).' };
+  }
+
+  return { valid: true };
 }
 
+// Control characters, zero-width space, BOM and bidirectional overrides (used to visually spoof names).
+const UNSAFE_TEXT_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F​‪-‮⁦-⁩﻿]/g;
+
 /**
- * Sanitizes generic user text input (room titles, messages, names).
- * Removes ASCII control characters and enforces length bounds.
+ * Sanitizes generic user text input (messages, notes).
+ * Removes control and direction-override characters and enforces length bounds.
+ * Keeps newlines and tabs.
  */
 export function sanitizeTextInput(input: string, maxLength = 300): string {
   if (typeof input !== 'string') return '';
+  return input.replace(UNSAFE_TEXT_CHARS, '').trim().slice(0, maxLength);
+}
 
-  // Remove dangerous non-printable ASCII control characters (keep newline and tab)
-  const cleaned = input.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
-
-  return cleaned.trim().slice(0, maxLength);
+/**
+ * Like sanitizeTextInput, but collapses all whitespace (including newlines) so the result is a
+ * single line. Use for names and titles.
+ */
+export function sanitizeSingleLine(input: string, maxLength = 50): string {
+  if (typeof input !== 'string') return '';
+  return sanitizeTextInput(input, maxLength * 4).replace(/\s+/g, ' ').trim().slice(0, maxLength);
 }
 
 /**
@@ -85,7 +114,8 @@ export function validateRoomCode(input: string): string | null {
 
 /**
  * Validates an incoming sync message from BroadcastChannel or LocalStorage.
- * Defends against prototype pollution, state poisoning, and injection attacks.
+ * Whitelists message types, bounds every number, rebuilds the payload from scratch and
+ * rejects stale or far-future messages.
  */
 export function validateSyncAction(raw: unknown, expectedRoomId: string): SyncAction | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -100,21 +130,21 @@ export function validateSyncAction(raw: unknown, expectedRoomId: string): SyncAc
   }
 
   // Type verification (whitelist)
-  const allowedTypes = ['PLAY', 'PAUSE', 'SEEK', 'CHAT', 'REACTION', 'PING'];
+  const allowedTypes = ['PLAY', 'PAUSE', 'SEEK', 'CHAT', 'REACTION', 'PING', 'SYNC_REQUEST'];
   if (typeof candidate.type !== 'string' || !allowedTypes.includes(candidate.type)) {
     return null;
   }
 
   // Sender verification
-  if (typeof candidate.senderId !== 'string' || candidate.senderId.length > 64) {
+  if (typeof candidate.senderId !== 'string' || !ID_PATTERN.test(candidate.senderId)) {
     return null;
   }
 
-  // Timestamp sanity check (must be a realistic number within 1 hour)
+  // Timestamp must be a finite number close to the local clock (stops replays of old messages)
   if (
     typeof candidate.timestamp !== 'number' ||
     !Number.isFinite(candidate.timestamp) ||
-    candidate.timestamp < 0
+    Math.abs(Date.now() - candidate.timestamp) > MAX_MESSAGE_AGE_MS
   ) {
     return null;
   }
@@ -133,49 +163,51 @@ export function validateSyncAction(raw: unknown, expectedRoomId: string): SyncAc
     currentTime = candidate.currentTime;
   }
 
-  // Payload verification
+  // Payload verification: rebuild the payload from validated fields only
   let sanitizedPayload: unknown = undefined;
-  if (candidate.type === 'CHAT' && candidate.payload && typeof candidate.payload === 'object') {
+  if (candidate.type === 'CHAT') {
+    if (!candidate.payload || typeof candidate.payload !== 'object') return null;
     const p = candidate.payload as Record<string, unknown>;
     const text = sanitizeTextInput(String(p.text || ''), 300);
-    const senderName = sanitizeTextInput(String(p.senderName || 'Anonymous'), 50);
+    const senderName = sanitizeSingleLine(String(p.senderName || 'Anonymous'), 50) || 'Anonymous';
     if (!text) return null;
 
     sanitizedPayload = {
-      id: sanitizeTextInput(String(p.id || `msg_${Date.now()}`), 64),
-      senderId: sanitizeTextInput(String(p.senderId || candidate.senderId), 64),
+      id: sanitizeSingleLine(String(p.id || randomId('msg')), 64),
+      // Always the real sender of the sync message; a peer cannot claim another peer's id.
+      senderId: candidate.senderId,
       senderName,
       senderAvatar: '',
       text,
-      timestamp: sanitizeTextInput(String(p.timestamp || ''), 20),
+      timestamp: sanitizeSingleLine(String(p.timestamp || ''), 20),
       videoTimestamp:
         typeof p.videoTimestamp === 'number' && Number.isFinite(p.videoTimestamp)
           ? Math.max(0, Math.min(86400, Math.floor(p.videoTimestamp)))
           : undefined,
     } as ChatMessage;
-  } else if (candidate.type === 'REACTION' && candidate.payload && typeof candidate.payload === 'object') {
-    const p = candidate.payload as Record<string, unknown>;
-    const rawEmoji = String(p.emoji || '');
-    // Allow standard emojis up to 8 bytes
-    if (rawEmoji.length > 0 && rawEmoji.length <= 8) {
-      sanitizedPayload = { emoji: rawEmoji.slice(0, 8) };
-    } else {
+  } else if (candidate.type === 'REACTION') {
+    if (!candidate.payload || typeof candidate.payload !== 'object') return null;
+    const emoji = (candidate.payload as Record<string, unknown>).emoji;
+    if (typeof emoji !== 'string' || !ALLOWED_REACTIONS.includes(emoji)) {
       return null;
     }
+    sanitizedPayload = { emoji };
   }
 
   return {
     type: candidate.type as SyncAction['type'],
     roomId: candidate.roomId as string,
-    senderId: candidate.senderId as string,
+    senderId: candidate.senderId,
     currentTime,
-    timestamp: candidate.timestamp as number,
+    timestamp: candidate.timestamp,
     payload: sanitizedPayload,
   };
 }
 
 /**
  * Client-side sliding window rate limiter to throttle user actions (chat spam, sync bursts).
+ * This only protects the local UI: anything running in a browser can be bypassed, so a real
+ * server must enforce its own limits.
  */
 export class RateLimiter {
   private timestamps: number[] = [];

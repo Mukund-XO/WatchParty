@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { TopBar } from './components/TopBar';
@@ -8,31 +8,25 @@ import { HowSyncWorks } from './components/HowSyncWorks';
 import { Footer } from './components/Footer';
 import { CreateRoomModal } from './components/CreateRoomModal';
 import { WatchRoomView } from './components/WatchRoomView';
-import { MOVIES_CATALOG } from './data/movies';
 import { WatchRoom, MovieItem } from './types';
-import { validateRoomCode } from './utils/security';
+import { validateRoomCode, sanitizeSingleLine, randomId } from './utils/security';
+import { loadRoomRecord, saveRoomRecord } from './utils/roomRegistry';
+
+const formatCode = (code: string) => `${code.slice(0, 3)}-${code.slice(3)}`;
+const clockLabel = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+function setRoomHash(code: string | null) {
+  const base = window.location.pathname + window.location.search;
+  // replaceState does not fire "hashchange", so this never re-triggers the join handler
+  window.history.replaceState(null, '', code ? `${base}#room=${code}` : base);
+}
 
 function MainApp() {
   const { user } = useAuth();
   const [activeRoom, setActiveRoom] = useState<WatchRoom | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [movieToHost, setMovieToHost] = useState<MovieItem | null>(null);
-
-  useEffect(() => {
-    const handleHash = () => {
-      const hash = window.location.hash;
-      if (hash.startsWith('#room=')) {
-        const code = hash.replace('#room=', '').trim();
-        if (code) {
-          handleJoinRoom(code);
-        }
-      }
-    };
-
-    handleHash();
-    window.addEventListener('hashchange', handleHash);
-    return () => window.removeEventListener('hashchange', handleHash);
-  }, []);
+  const [joinNotice, setJoinNotice] = useState<string | null>(null);
 
   const handleScrollToListings = () => {
     const el = document.getElementById('listings-grid');
@@ -63,110 +57,99 @@ function MainApp() {
     hostName?: string;
   }) => {
     setIsCreateModalOpen(false);
+    setJoinNotice(null);
 
-    const effectiveHostName = hostName?.trim() || user?.name || 'Guest Host';
+    const effectiveHostName = sanitizeSingleLine(hostName ?? '', 40) || user.name;
 
-    const newRoom: WatchRoom = {
+    // Remember the room so another tab of this browser can join it by code or link
+    saveRoomRecord({ code, title, hostName: effectiveHostName, movie, createdAt: Date.now() });
+
+    setActiveRoom({
       id: code,
       title,
-      hostId: user?.id || 'host_guest',
       hostName: effectiveHostName,
       movie,
-      isPlaying: false,
-      currentTime: 0,
-      lastUpdated: Date.now(),
-      viewers: [
-        {
-          id: user?.id || 'host_guest',
-          name: effectiveHostName,
-          avatar: user?.avatar || '',
-          isHost: true,
-          joinedAt: Date.now(),
-          pingMs: 14,
-        },
-      ],
       chatMessages: [
         {
-          id: 'welcome_msg',
+          id: randomId('msg'),
           senderId: 'system',
           senderName: 'Watch Party',
           senderAvatar: '',
-          text: `Welcome to "${title}". Room passkey is ${code.slice(0, 3)}-${code.slice(3)}. Playback is synchronized across all viewers.`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          text: `Room ${formatCode(code)} is live. Open the invite link in another tab of this browser to watch in sync.`,
+          timestamp: clockLabel(),
         },
       ],
-      isHost: true,
-    };
-
-    setActiveRoom(newRoom);
-    window.location.hash = `room=${code}`;
+    });
+    setRoomHash(code);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleJoinRoom = (code: string) => {
-    const validCode = validateRoomCode(code) || '842910';
-    const movieIndex = Math.abs(parseInt(validCode, 10) || 0) % MOVIES_CATALOG.length;
-    const selectedFilm = MOVIES_CATALOG[movieIndex] || MOVIES_CATALOG[0];
+  /** Returns an error message to show the user, or null when the room was joined. */
+  const handleJoinRoom = (code: string): string | null => {
+    const validCode = validateRoomCode(code);
+    if (!validCode) {
+      return 'Please enter a valid 6-digit room passkey.';
+    }
 
-    const joinedRoom: WatchRoom = {
-      id: validCode,
-      title: `${selectedFilm.title} Screening`,
-      hostId: 'host_peer',
-      hostName: 'Host (Arjun K.)',
-      movie: selectedFilm,
-      isPlaying: false,
-      currentTime: 0,
-      lastUpdated: Date.now(),
-      viewers: [
-        {
-          id: 'host_peer',
-          name: 'Arjun K.',
-          avatar: '',
-          isHost: true,
-          joinedAt: Date.now() - 600000,
-          pingMs: 18,
-        },
-        {
-          id: user?.id || 'usr_joined',
-          name: user?.name || 'Guest Student',
-          avatar: user?.avatar || '',
-          isHost: false,
-          joinedAt: Date.now(),
-          pingMs: 12,
-        },
-      ],
+    const record = loadRoomRecord(validCode);
+    if (!record) {
+      return `No room ${formatCode(validCode)} found in this browser. Rooms currently only work between tabs of the browser that created them.`;
+    }
+
+    setJoinNotice(null);
+    setActiveRoom({
+      id: record.code,
+      title: record.title,
+      hostName: record.hostName,
+      movie: record.movie,
       chatMessages: [
         {
-          id: 'm1',
-          senderId: 'host_peer',
-          senderName: 'Arjun K.',
-          senderAvatar: '',
-          text: `Hey everyone, glad you made it! Starting the film now.`,
-          timestamp: '19:42',
-          videoTimestamp: 15,
-        },
-        {
-          id: 'm2',
+          id: randomId('msg'),
           senderId: 'system',
           senderName: 'Watch Party',
           senderAvatar: '',
-          text: `Connected to room ${validCode}. Playback lock enabled.`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          text: `Joined room ${formatCode(record.code)}. Asking other tabs for the current playback position.`,
+          timestamp: clockLabel(),
         },
       ],
-      isHost: false,
-    };
-
-    setActiveRoom(joinedRoom);
-    window.location.hash = `room=${validCode}`;
+    });
+    setRoomHash(record.code);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    return null;
   };
 
   const handleLeaveRoom = () => {
     setActiveRoom(null);
-    history.pushState('', document.title, window.location.pathname + window.location.search);
+    setRoomHash(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  // Join from an invite link (#room=123456). Refs keep the listener pointed at the latest handler
+  // and room without re-registering it on every render.
+  const joinRef = useRef(handleJoinRoom);
+  joinRef.current = handleJoinRoom;
+  const activeRoomIdRef = useRef<string | null>(null);
+  activeRoomIdRef.current = activeRoom?.id ?? null;
+
+  useEffect(() => {
+    const handleHash = () => {
+      const match = window.location.hash.match(/^#room=(.*)$/);
+      if (!match) return;
+
+      const code = validateRoomCode(match[1]);
+      if (code && code === activeRoomIdRef.current) return;
+
+      const error = code ? joinRef.current(code) : 'That invite link does not contain a valid room code.';
+      if (error) {
+        setJoinNotice(error);
+        setRoomHash(null);
+      }
+    };
+
+    handleHash();
+    window.addEventListener('hashchange', handleHash);
+    return () => window.removeEventListener('hashchange', handleHash);
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#090a0d] text-[#FAF7F1] flex flex-col font-sans selection:bg-white/20 selection:text-white">
@@ -188,6 +171,23 @@ function MainApp() {
         <WatchRoomView room={activeRoom} onLeaveRoom={handleLeaveRoom} />
       ) : (
         <main className="flex-1">
+          {joinNotice && (
+            <div className="px-4 sm:px-6 lg:px-8 pt-6">
+              <div
+                role="alert"
+                className="max-w-4xl mx-auto px-4 py-3 rounded-2xl border border-rose-400/30 bg-rose-500/10 text-rose-200 text-xs flex items-center justify-between gap-3"
+              >
+                <span>{joinNotice}</span>
+                <button
+                  onClick={() => setJoinNotice(null)}
+                  className="shrink-0 underline underline-offset-2 hover:text-white cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* 2) Main Hero with punchline "Enjoy Every Frame With Friends.", Space Grotesk topic font, and 2-button split */}
           <HeroSection
             onCreateRoom={handleCreateRoomClick}
@@ -195,11 +195,8 @@ function MainApp() {
             onScrollToListings={handleScrollToListings}
           />
 
-          {/* 3) Horizontal Slides Movies Section (Compact height, reduced AI image dependence) */}
-          <ListingsGrid
-            onSelectMovieToHost={handleSelectMovieToHost}
-            onQuickJoinDemo={handleJoinRoom}
-          />
+          {/* 3) Horizontal Slides Movies Section */}
+          <ListingsGrid onSelectMovieToHost={handleSelectMovieToHost} />
 
           {/* 4) Sync Protocol */}
           <HowSyncWorks />
@@ -209,13 +206,16 @@ function MainApp() {
       {/* Footer */}
       {!activeRoom && <Footer onScrollToListings={handleScrollToListings} />}
 
-      {/* Create Room Drawer/Modal */}
-      <CreateRoomModal
-        isOpen={isCreateModalOpen}
-        onClose={() => setIsCreateModalOpen(false)}
-        onRoomCreated={handleRoomCreated}
-        initialMovie={movieToHost}
-      />
+      {/* Create Room Drawer/Modal. Mounted only while open so every opening starts with a fresh
+          room code and the film that was clicked. */}
+      {isCreateModalOpen && (
+        <CreateRoomModal
+          isOpen
+          onClose={() => setIsCreateModalOpen(false)}
+          onRoomCreated={handleRoomCreated}
+          initialMovie={movieToHost}
+        />
+      )}
     </div>
   );
 }

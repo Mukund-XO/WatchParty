@@ -1,5 +1,4 @@
 import { MovieItem } from '../types';
-import { sanitizeSingleLine } from '../utils/security';
 
 /**
  * Sample library. These are the Blender Foundation's open movies, streamed from Google's public
@@ -68,22 +67,3 @@ export const MOVIES_CATALOG: MovieItem[] = [
     tags: ['Open movie', 'CC BY 2.5'],
   },
 ];
-
-/**
- * Builds a library entry for a host-provided video link. The caller must have checked the URL
- * with isSafeMediaUrl first.
- */
-export function buildCustomMovie(videoUrl: string, title: string): MovieItem {
-  return {
-    id: `custom_${Date.now()}`,
-    title: sanitizeSingleLine(title, 80) || 'Custom Video',
-    subtitle: 'Direct link',
-    duration: 'Varies',
-    year: new Date().getFullYear(),
-    genre: 'Custom video',
-    director: 'Unknown',
-    description: 'Played directly from a link provided by the room host.',
-    videoUrl: videoUrl.trim(),
-    tags: ['Custom link'],
-  };
-}

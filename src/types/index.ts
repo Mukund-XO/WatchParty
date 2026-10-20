@@ -1,5 +1,5 @@
 export interface UserAccount {
-  /** Random per-tab id, regenerated on every page load. Never persisted. */
+  /** Firebase anonymous-auth uid. Empty until sign-in has finished. */
   id: string;
   name: string;
   avatar: string;
@@ -22,33 +22,44 @@ export interface MovieItem {
   tags: string[];
 }
 
-export interface ChatMessage {
-  id: string;
-  senderId: string;
-  senderName: string;
-  senderAvatar: string;
-  text: string;
-  timestamp: string;
-  videoTimestamp?: number;
-  reactionEmoji?: string;
-}
+/** Who may play, pause and seek for the whole room. */
+export type ControlMode = 'host' | 'everyone';
 
-export interface WatchRoom {
-  id: string; // 6-digit code
+/** Fixed facts about a room, written once when it is created. */
+export interface RoomMeta {
+  hostUid: string;
   title: string;
-  hostName: string;
-  movie: MovieItem;
-  chatMessages: ChatMessage[];
+  videoUrl: string;
+  videoTitle: string;
+  controlMode: ControlMode;
+  /** Server time in ms. */
+  createdAt: number;
 }
 
-export interface SyncAction {
-  type: 'PLAY' | 'PAUSE' | 'SEEK' | 'CHAT' | 'REACTION' | 'PING' | 'SYNC_REQUEST';
-  roomId: string;
-  senderId: string;
-  currentTime?: number;
-  playbackRate?: number;
-  timestamp: number;
-  payload?: any;
+export interface Member {
+  uid: string;
+  name: string;
+  /** Server time in ms. */
+  joinedAt: number;
+}
+
+export interface ChatEntry {
+  id: string;
+  uid: string;
+  name: string;
+  text: string;
+  /** Server time in ms. */
+  at: number;
+  /** Where in the video the message was sent, in seconds. */
+  videoTime?: number;
+}
+
+export interface RoomReaction {
+  id: string;
+  uid: string;
+  kind: 'popcorn' | 'fire' | 'clap' | 'shock' | 'heart';
+  /** Server time in ms. */
+  at: number;
 }
 
 export interface TopBarTheme {

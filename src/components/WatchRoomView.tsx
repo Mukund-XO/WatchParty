@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Play,
   Pause,
@@ -9,27 +9,28 @@ import {
   Check,
   MessageSquare,
   BookOpen,
+  Users,
   ArrowLeft,
   Share2,
   RotateCcw,
   Send,
   Radio,
-  ShieldCheck,
+  WifiOff,
+  Crown,
+  X,
+  Loader2,
+  TriangleAlert,
+  Lock,
 } from 'lucide-react';
-import { WatchRoom, ChatMessage, SyncAction } from '../types';
-import { SyncChannel } from './SyncEngine';
+import { RoomReaction } from '../types';
 import { useAuth } from '../context/AuthContext';
-import {
-  ALLOWED_REACTIONS,
-  RateLimiter,
-  isSafeMediaUrl,
-  randomId,
-  sanitizeSingleLine,
-  sanitizeTextInput,
-} from '../utils/security';
+import { MOVIES_CATALOG } from '../data/movies';
+import { PlaybackSync, type SyncReport } from '../lib/playbackSync';
+import { useRoomSession } from '../lib/useRoomSession';
+import { REACTIONS, REACTION_KINDS, RateLimiter, formatRoomCode, sanitizeTextInput, type ReactionKind } from '../utils/security';
 
 interface WatchRoomViewProps {
-  room: WatchRoom;
+  code: string;
   onLeaveRoom: () => void;
 }
 
@@ -39,370 +40,422 @@ interface FloatingReaction {
   x: number;
 }
 
-const MAX_CHAT_MESSAGES = 500;
-const MAX_NOTES_CHARS = 20000;
-const SEEK_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
+const NOTES_MAX = 5000;
+const notesKey = (code: string) => `watchparty_notes_${code}`;
 
-async function copyToClipboard(text: string): Promise<boolean> {
+function loadNotes(code: string): string {
   try {
-    await navigator.clipboard.writeText(text);
-    return true;
+    return (localStorage.getItem(notesKey(code)) ?? '').slice(0, NOTES_MAX);
   } catch {
-    // Clipboard access is blocked on insecure origins or when permission is denied
-    return false;
+    return '';
   }
 }
 
-export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom }) => {
+function formatSeconds(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '00:00';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  const mm = m.toString().padStart(2, '0');
+  const ss = s.toString().padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function formatClock(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+const SYNC_LABELS: Record<SyncReport['status'], string> = {
+  loading: 'Loading video...',
+  synced: 'In sync',
+  'catching-up': 'Catching up...',
+  waiting: 'Paused',
+  'needs-tap': 'Tap to join',
+};
+
+export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ code, onLeaveRoom }) => {
   const { user } = useAuth();
   const videoRef = useRef<HTMLVideoElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const syncRef = useRef<PlaybackSync | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const reactionTimers = useRef<number[]>([]);
+  const chatLimiter = useRef(new RateLimiter(6, 3000));
+  const reactionLimiter = useRef(new RateLimiter(5, 3000));
 
-  const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [scrub, setScrub] = useState<number | null>(null);
   const [duration, setDuration] = useState(0);
-  const [volume] = useState(0.85);
   const [isMuted, setIsMuted] = useState(false);
-  const [copiedCode, setCopiedCode] = useState(false);
-  const [copiedLink, setCopiedLink] = useState(false);
-  const [activeTab, setActiveTab] = useState<'chat' | 'notes'>('chat');
+  const [volume, setVolume] = useState(0.85);
+  const [report, setReport] = useState<SyncReport>({ status: 'loading', drift: 0, target: 0 });
+  const [needsTap, setNeedsTap] = useState(false);
+  const [videoError, setVideoError] = useState(false);
+  const [copied, setCopied] = useState<'code' | 'link' | null>(null);
+  const [activeTab, setActiveTab] = useState<'chat' | 'viewers' | 'notes'>('chat');
   const [chatInput, setChatInput] = useState('');
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(room.chatMessages);
-  const [floatingReactions, setFloatingReactions] = useState<FloatingReaction[]>([]);
-  const [syncStatus, setSyncStatus] = useState<'synced' | 'syncing'>('synced');
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [floating, setFloating] = useState<FloatingReaction[]>([]);
+  const [notes, setNotes] = useState(() => loadNotes(code));
 
-  const notesKey = `watchparty_notes_${room.id}`;
-  const [notes, setNotes] = useState<string>(() => {
-    try {
-      const saved = localStorage.getItem(notesKey);
-      if (saved !== null) return saved.slice(0, MAX_NOTES_CHARS);
-    } catch {
-      // Storage unavailable: start with the default template
-    }
-    return `# ${room.movie.title} Screening Notes\n- Opening sequence establishes quiet mood\n- Sound design shift at 03:40\n- Discussion scheduled right after credits roll`;
-  });
+  const onReaction = useCallback((reaction: RoomReaction) => {
+    const id = `${reaction.id}`;
+    const x = 20 + Math.random() * 60;
+    setFloating((prev) => [...prev.slice(-12), { id, emoji: REACTIONS[reaction.kind], x }]);
+    const timer = window.setTimeout(() => setFloating((prev) => prev.filter((r) => r.id !== id)), 2000);
+    reactionTimers.current.push(timer);
+  }, []);
 
-  const syncChannelRef = useRef<SyncChannel | null>(null);
-  const chatLimiterRef = useRef(new RateLimiter(6, 3000));
+  const session = useRoomSession(code, user.id, user.name, onReaction);
+  const { status, meta, playback, members, chat, connected, isHost, canControl, actions, serverNow } = session;
 
-  // Re-check the video URL at the point of use, not only when the room was created.
-  const safeVideoUrl = useMemo(
-    () => (isSafeMediaUrl(room.movie.videoUrl).valid ? room.movie.videoUrl : undefined),
-    [room.movie.videoUrl]
-  );
+  const isPlaying = playback?.playing ?? false;
+  const hostName = meta ? (members.find((m) => m.uid === meta.hostUid)?.name ?? 'Host') : '';
+  const film = meta ? MOVIES_CATALOG.find((m) => m.videoUrl === meta.videoUrl) : undefined;
 
-  // Notes are saved in this browser, per room
+  // ------------------------------------------------------------------------------------------
+  // Keeping the video in step with the room
+  // ------------------------------------------------------------------------------------------
+
+  const latestPlayback = useRef(playback);
+  latestPlayback.current = playback;
+
+  // Start the sync engine when the <video> exists (the room has loaded)
   useEffect(() => {
-    try {
-      localStorage.setItem(notesKey, notes.slice(0, MAX_NOTES_CHARS));
-    } catch {
-      // Storage full or blocked: notes stay in memory only
-    }
-  }, [notes, notesKey]);
+    const video = videoRef.current;
+    if (!video || status !== 'ready') return;
 
-  useEffect(() => {
-    const applyRemoteAction = (action: SyncAction) => {
-      const video = videoRef.current;
+    const sync = new PlaybackSync(video, serverNow, setNeedsTap);
+    syncRef.current = sync;
+    sync.setState(latestPlayback.current);
+    setReport(sync.tick());
 
-      switch (action.type) {
-        case 'PLAY':
-          if (video) {
-            if (action.currentTime !== undefined && Math.abs(video.currentTime - action.currentTime) > 0.3) {
-              video.currentTime = action.currentTime;
-            }
-            // May be rejected by the browser's autoplay policy; the video's own play/pause
-            // events keep the UI state truthful either way.
-            video.play().catch(() => {});
-          }
-          break;
-
-        case 'PAUSE':
-          if (video) {
-            if (action.currentTime !== undefined) {
-              video.currentTime = action.currentTime;
-            }
-            video.pause();
-          }
-          break;
-
-        case 'SEEK':
-          if (video && action.currentTime !== undefined) {
-            video.currentTime = action.currentTime;
-            setCurrentTime(action.currentTime);
-          }
-          break;
-
-        case 'SYNC_REQUEST':
-          // A tab that just joined asks for the current state. Answer with ours.
-          if (video && video.readyState >= 1) {
-            channel.broadcast({
-              type: video.paused ? 'PAUSE' : 'PLAY',
-              currentTime: video.currentTime,
-            });
-          }
-          break;
-
-        case 'CHAT': {
-          const incoming = action.payload as ChatMessage | undefined;
-          if (incoming) {
-            setChatMessages((prev) =>
-              prev.some((m) => m.id === incoming.id) ? prev : [...prev, incoming].slice(-MAX_CHAT_MESSAGES)
-            );
-          }
-          break;
-        }
-
-        case 'REACTION':
-          if (action.payload?.emoji) {
-            triggerFloatingReaction(action.payload.emoji);
-          }
-          break;
-      }
+    const interval = window.setInterval(() => setReport(sync.tick()), 1000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') setReport(sync.tick());
     };
-
-    const channel = new SyncChannel(room.id, applyRemoteAction);
-    syncChannelRef.current = channel;
-
-    // If other tabs are already in this room, ask where they are
-    channel.broadcast({ type: 'SYNC_REQUEST' });
+    document.addEventListener('visibilitychange', onVisible);
 
     return () => {
-      channel.destroy();
-      if (syncChannelRef.current === channel) {
-        syncChannelRef.current = null;
-      }
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+      syncRef.current = null;
     };
-  }, [room.id]);
+  }, [status, serverNow]);
+
+  // Apply every change to the shared playhead immediately
+  useEffect(() => {
+    const sync = syncRef.current;
+    if (!sync) return;
+    sync.setState(playback);
+    setReport(sync.tick());
+  }, [playback]);
+
+  // Clean up timers, and keep the chat scrolled to the newest message
+  useEffect(() => () => reactionTimers.current.forEach((t) => window.clearTimeout(t)), []);
+  useEffect(() => {
+    if (activeTab === 'chat') chatEndRef.current?.scrollIntoView({ block: 'end' });
+  }, [chat.length, activeTab]);
+
+  // Notes stay on this device only
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        if (notes) localStorage.setItem(notesKey(code), notes);
+        else localStorage.removeItem(notesKey(code));
+      } catch {
+        // Storage may be blocked; notes then last only for this visit
+      }
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [notes, code]);
+
+  // ------------------------------------------------------------------------------------------
+  // Actions
+  // ------------------------------------------------------------------------------------------
+
+  const fail = (message: string) => {
+    setActionError(message);
+    window.setTimeout(() => setActionError((current) => (current === message ? null : current)), 4000);
+  };
+
+  const runAction = (promise: Promise<unknown>, message = 'That did not go through. Check your connection and try again.') => {
+    promise.catch(() => fail(message));
+  };
+
+  const CONTROL_DENIED = 'Only the host can control playback in this room.';
 
   const togglePlayPause = () => {
     const video = videoRef.current;
     if (!video) return;
-
-    if (video.paused) {
-      // Only tell the others to play if this tab actually managed to start
-      video
-        .play()
-        .then(() => {
-          syncChannelRef.current?.broadcast({ type: 'PLAY', currentTime: video.currentTime });
-        })
-        .catch(() => {});
-    } else {
-      video.pause();
-      syncChannelRef.current?.broadcast({ type: 'PAUSE', currentTime: video.currentTime });
-    }
-  };
-
-  const handleTimeUpdate = () => {
-    if (videoRef.current) {
-      setCurrentTime(videoRef.current.currentTime);
-    }
-  };
-
-  const handleLoadedMetadata = () => {
-    if (videoRef.current) {
-      setDuration(videoRef.current.duration);
-      videoRef.current.volume = volume;
-    }
-  };
-
-  // While dragging the slider only this tab moves. The new position is sent once, on release,
-  // so the final position is never lost to the broadcast rate limit.
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newTime = parseFloat(e.target.value);
-    if (videoRef.current && Number.isFinite(newTime)) {
-      videoRef.current.currentTime = newTime;
-      setCurrentTime(newTime);
-    }
+    if (!canControl) return fail(CONTROL_DENIED);
+    const atEnd = video.ended || (Number.isFinite(video.duration) && video.currentTime >= video.duration - 0.5);
+    runAction(actions.setPlayback(!isPlaying, atEnd ? 0 : video.currentTime), CONTROL_DENIED);
   };
 
   const commitSeek = () => {
-    if (videoRef.current) {
-      syncChannelRef.current?.broadcast({ type: 'SEEK', currentTime: videoRef.current.currentTime });
-    }
+    if (scrub === null) return;
+    const target = scrub;
+    setScrub(null);
+    if (!canControl) return fail(CONTROL_DENIED);
+    runAction(actions.setPlayback(isPlaying, target), CONTROL_DENIED);
   };
 
-  // Clicking a chat timestamp only moves this tab, so one message cannot yank everyone's video around.
   const jumpToTimecode = (seconds: number) => {
-    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return;
-    const bounded = Math.max(0, Math.min(duration || 86400, seconds));
-
-    if (videoRef.current) {
-      videoRef.current.currentTime = bounded;
-      setCurrentTime(bounded);
-    }
+    if (!canControl) return;
+    const bounded = Math.max(0, Math.min(duration || 86_400, seconds));
+    runAction(actions.setPlayback(isPlaying, bounded), CONTROL_DENIED);
   };
 
-  // Pushes THIS tab's position and play state to every other tab in the room
   const forceResync = () => {
-    setSyncStatus('syncing');
-    if (videoRef.current) {
-      syncChannelRef.current?.broadcast({
-        type: videoRef.current.paused ? 'PAUSE' : 'PLAY',
-        currentTime: videoRef.current.currentTime,
-      });
-    }
-    setTimeout(() => setSyncStatus('synced'), 400);
+    const sync = syncRef.current;
+    if (!sync) return;
+    sync.setState(playback);
+    setReport(sync.tick());
   };
 
-  const triggerFloatingReaction = (emoji: string) => {
-    if (!ALLOWED_REACTIONS.includes(emoji)) return;
-    const newReaction: FloatingReaction = {
-      id: randomId('fx'),
-      emoji,
-      x: 20 + Math.random() * 60,
-    };
-    setFloatingReactions((prev) => [...prev, newReaction]);
-    setTimeout(() => {
-      setFloatingReactions((prev) => prev.filter((r) => r.id !== newReaction.id));
-    }, 2000);
-  };
-
-  const sendReaction = (emoji: string) => {
-    if (!ALLOWED_REACTIONS.includes(emoji)) return;
-    triggerFloatingReaction(emoji);
-    syncChannelRef.current?.broadcast({
-      type: 'REACTION',
-      payload: { emoji },
-    });
+  const sendReaction = (kind: ReactionKind) => {
+    if (!reactionLimiter.current.canProceed()) return;
+    runAction(actions.sendReaction(kind));
   };
 
   const handleSendChat = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanText = sanitizeTextInput(chatInput, 300);
-    if (!cleanText) return;
-
-    // Rate-limit chat messages to stop message flooding
-    if (!chatLimiterRef.current.canProceed()) {
-      return;
-    }
-
-    const newMsg: ChatMessage = {
-      id: randomId('msg'),
-      senderId: user.id,
-      senderName: sanitizeSingleLine(user.name || 'Viewer', 50),
-      senderAvatar: '',
-      text: cleanText,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      videoTimestamp: Math.max(0, Math.floor(currentTime)),
-    };
-
-    setChatMessages((prev) => [...prev, newMsg].slice(-MAX_CHAT_MESSAGES));
-    syncChannelRef.current?.broadcast({
-      type: 'CHAT',
-      payload: newMsg,
-    });
+    const text = sanitizeTextInput(chatInput, 300);
+    if (!text) return;
+    if (!chatLimiter.current.canProceed()) return fail('Slow down a little: too many messages at once.');
+    runAction(actions.sendChat(text, currentTime), 'Message not sent. Check your connection and try again.');
     setChatInput('');
   };
 
-  const copyRoomCode = async () => {
-    if (await copyToClipboard(room.id)) {
-      setCopiedCode(true);
-      setTimeout(() => setCopiedCode(false), 2000);
+  const copy = async (what: 'code' | 'link') => {
+    const text = what === 'code' ? code : `${window.location.origin}${window.location.pathname}#room=${code}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(what);
+      window.setTimeout(() => setCopied(null), 2000);
+    } catch {
+      fail('Could not copy. Select the text and copy it by hand.');
     }
   };
 
-  const copyRoomLink = async () => {
-    const url = `${window.location.origin}${window.location.pathname}#room=${room.id}`;
-    if (await copyToClipboard(url)) {
-      setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2000);
+  const toggleMute = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = !isMuted;
+    setIsMuted(!isMuted);
+  };
+
+  const changeVolume = (value: number) => {
+    const video = videoRef.current;
+    setVolume(value);
+    if (video) {
+      video.volume = value;
+      if (value > 0 && video.muted) {
+        video.muted = false;
+        setIsMuted(false);
+      }
     }
   };
 
-  const formatSeconds = (sec: number) => {
-    if (!Number.isFinite(sec)) return '00:00';
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      stageRef.current?.requestFullscreen?.().catch(() => {});
+    }
   };
+
+  const confirmRemove = (uid: string, name: string) => {
+    if (window.confirm(`Remove ${name} from this room? They will not be able to rejoin with the same browser.`)) {
+      runAction(actions.removeViewer(uid), 'Could not remove that viewer.');
+    }
+  };
+
+  // ------------------------------------------------------------------------------------------
+  // Screens other than the room itself
+  // ------------------------------------------------------------------------------------------
+
+  if (status !== 'ready' || !meta) {
+    const message =
+      status === 'not-found'
+        ? { title: 'Room not found', body: 'This code is not an active room. It may have been mistyped, or the room is more than 24 hours old.' }
+        : status === 'removed'
+          ? { title: 'Removed from room', body: 'The host removed you from this room.' }
+          : status === 'error'
+            ? { title: 'Could not open the room', body: session.error ?? 'Something went wrong. Try again.' }
+            : null;
+
+    return (
+      <div className="flex-1 flex items-center justify-center p-6">
+        {message ? (
+          <div role="alert" className="max-w-md text-center space-y-4">
+            <TriangleAlert className="w-8 h-8 mx-auto text-amber-300" />
+            <h1 className="font-topic text-xl font-bold text-[#FAF7F1]">{message.title}</h1>
+            <p className="text-sm text-[#9c978b]">{message.body}</p>
+            <button
+              onClick={onLeaveRoom}
+              className="px-5 py-2.5 rounded-xl bg-[#FAF7F1] text-[#090a0d] text-xs font-topic font-bold cursor-pointer hover:bg-white"
+            >
+              Back to lobby
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-sm text-[#9c978b]">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>Joining room {formatRoomCode(code)}...</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const sliderValue = scrub ?? currentTime;
+  const shownDrift = Math.abs(report.drift);
 
   return (
-    <div className="min-h-screen bg-[#090a0d] flex flex-col">
-      {/* Room Navigation Sub-Header */}
+    <div className="flex-1 bg-[#090a0d] flex flex-col">
+      {/* Room header */}
       <div className="bg-[#0f1117] border-b border-white/[0.08] px-4 sm:px-6 py-3">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={onLeaveRoom}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] text-[#9c978b] hover:text-[#FAF7F1] border border-white/10 text-xs font-medium transition-colors cursor-pointer"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back to Lobby</span>
+              <span>Leave</span>
             </button>
-            <div>
-              <h1 className="font-topic text-sm font-bold text-[#FAF7F1] leading-tight">
-                {room.title}
-              </h1>
+            <div className="min-w-0">
+              <h1 className="font-topic text-sm font-bold text-[#FAF7F1] leading-tight truncate">{meta.title}</h1>
               <div className="flex items-center gap-2 text-[11px] text-[#9c978b] font-mono">
-                <span>{room.movie.title}</span>
+                <span className="truncate">{meta.videoTitle}</span>
                 <span>·</span>
-                <span>Host: {room.hostName}</span>
+                <span className="truncate">Host: {hostName}</span>
               </div>
             </div>
           </div>
 
-          {/* 6-Digit Room Pass & Invite Controls */}
-          <div className="flex items-center gap-2.5">
-            <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.04] border border-white/10 text-[#FAF7F1] text-xs font-mono">
-              <Radio className="w-3.5 h-3.5 text-[#FAF7F1] animate-pulse" />
-              <span>{syncStatus === 'synced' ? 'Synchronized' : 'Syncing...'}</span>
-            </div>
-
-            {/* Room Code Badge */}
-            <div className="flex items-center rounded-xl bg-black/60 border border-[#FAF7F1]/30 overflow-hidden text-xs">
-              <div className="px-3 py-1.5 font-mono font-bold text-[#FAF7F1] tracking-wider">
-                {room.id.slice(0, 3)}-{room.id.slice(3)}
+          <div className="flex flex-wrap items-center gap-2.5">
+            {!connected ? (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-400/30 text-amber-200 text-xs font-mono">
+                <WifiOff className="w-3.5 h-3.5" />
+                <span>Reconnecting...</span>
               </div>
+            ) : (
+              <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.04] border border-white/10 text-[#FAF7F1] text-xs font-mono" aria-live="polite">
+                <Radio className="w-3.5 h-3.5" />
+                <span>{SYNC_LABELS[report.status]}</span>
+                {report.status === 'catching-up' && shownDrift >= 0.5 && <span className="text-[#9c978b]">({shownDrift.toFixed(1)}s)</span>}
+              </div>
+            )}
+
+            <div className="flex items-center rounded-xl bg-black/60 border border-[#FAF7F1]/30 overflow-hidden text-xs">
+              <div className="px-3 py-1.5 font-mono font-bold text-[#FAF7F1] tracking-wider">{formatRoomCode(code)}</div>
               <button
-                onClick={copyRoomCode}
+                onClick={() => copy('code')}
+                aria-label="Copy room code"
                 className="px-2.5 py-1.5 hover:bg-white/[0.08] text-[#9c978b] hover:text-[#FAF7F1] border-l border-white/10 transition-colors flex items-center gap-1 cursor-pointer"
-                title="Copy Passkey"
               >
-                {copiedCode ? <Check className="w-3.5 h-3.5 text-[#FAF7F1]" /> : <Copy className="w-3.5 h-3.5" />}
-                <span className="text-[11px] font-medium hidden sm:inline">
-                  {copiedCode ? 'Copied' : 'Passkey'}
-                </span>
+                {copied === 'code' ? <Check className="w-3.5 h-3.5 text-[#FAF7F1]" /> : <Copy className="w-3.5 h-3.5" />}
+                <span className="text-[11px] font-medium hidden sm:inline">{copied === 'code' ? 'Copied' : 'Code'}</span>
               </button>
             </div>
 
             <button
-              onClick={copyRoomLink}
+              onClick={() => copy('link')}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-xs font-medium text-[#FAF7F1] transition-colors cursor-pointer"
             >
-              {copiedLink ? <Check className="w-3.5 h-3.5 text-[#FAF7F1]" /> : <Share2 className="w-3.5 h-3.5 text-[#FAF7F1]" />}
-              <span>{copiedLink ? 'Link Copied' : 'Invite'}</span>
+              {copied === 'link' ? <Check className="w-3.5 h-3.5" /> : <Share2 className="w-3.5 h-3.5" />}
+              <span>{copied === 'link' ? 'Link copied' : 'Invite'}</span>
             </button>
+
+            {isHost && (
+              <button
+                onClick={() => runAction(actions.setControlMode(meta.controlMode === 'host' ? 'everyone' : 'host'), 'Could not change the setting.')}
+                title="Choose who can play, pause and seek"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-xs font-medium text-[#FAF7F1] transition-colors cursor-pointer"
+              >
+                {meta.controlMode === 'host' ? <Lock className="w-3.5 h-3.5" /> : <Users className="w-3.5 h-3.5" />}
+                <span>{meta.controlMode === 'host' ? 'Only you control' : 'Everyone controls'}</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Main Watch Room Body */}
+      {actionError && (
+        <div className="px-4 sm:px-6 pt-4">
+          <div role="alert" className="max-w-7xl mx-auto px-4 py-2.5 rounded-xl border border-rose-400/30 bg-rose-500/10 text-rose-200 text-xs">
+            {actionError}
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Synchronized Video Player Area (8 cols) */}
+        {/* Player */}
         <div className="lg:col-span-8 flex flex-col gap-4">
-          <div className="relative group rounded-3xl bg-black border border-white/10 overflow-hidden shadow-2xl aspect-video flex items-center justify-center">
-            {safeVideoUrl ? (
-              <video
-                ref={videoRef}
-                src={safeVideoUrl}
-                preload="metadata"
-                onTimeUpdate={handleTimeUpdate}
-                onLoadedMetadata={handleLoadedMetadata}
-                onPlay={() => setIsPlaying(true)}
-                onPause={() => setIsPlaying(false)}
-                onEnded={() => setIsPlaying(false)}
-                className="w-full h-full object-contain cursor-pointer"
-                onClick={togglePlayPause}
-                playsInline
-              />
-            ) : (
-              <p className="px-6 text-center text-xs text-rose-300">
-                This video link was blocked because it is not a safe HTTPS address.
-              </p>
+          <div
+            ref={stageRef}
+            className="relative group rounded-3xl bg-black border border-white/10 overflow-hidden shadow-2xl aspect-video flex items-center justify-center"
+          >
+            <video
+              ref={videoRef}
+              src={meta.videoUrl}
+              preload="auto"
+              playsInline
+              onClick={togglePlayPause}
+              onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+              onDurationChange={(e) => setDuration(e.currentTarget.duration)}
+              onLoadedMetadata={(e) => {
+                setVideoError(false);
+                setDuration(e.currentTarget.duration);
+                e.currentTarget.volume = volume;
+                const sync = syncRef.current;
+                if (sync) setReport(sync.tick());
+              }}
+              onCanPlay={() => {
+                const sync = syncRef.current;
+                if (sync) setReport(sync.tick());
+              }}
+              onSeeked={() => {
+                const sync = syncRef.current;
+                if (sync) setReport(sync.tick());
+              }}
+              onError={() => setVideoError(true)}
+              className="w-full h-full object-contain cursor-pointer"
+            />
+
+            {videoError && (
+              <div role="alert" className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/85 p-6 text-center">
+                <TriangleAlert className="w-6 h-6 text-amber-300" />
+                <p className="text-sm text-[#FAF7F1] font-medium">This video could not be loaded.</p>
+                <p className="text-xs text-[#9c978b] max-w-sm">The link may be broken, blocked by the video host, or not a direct MP4/WebM file.</p>
+              </div>
             )}
 
-            {/* Floating Live Reactions */}
-            <div className="absolute inset-0 pointer-events-none overflow-hidden">
-              {floatingReactions.map((reaction) => (
+            {needsTap && !videoError && (
+              <button
+                onClick={() => syncRef.current?.resume()}
+                className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/70 text-[#FAF7F1] cursor-pointer"
+              >
+                <span className="w-16 h-16 rounded-full bg-[#FAF7F1] text-[#090a0d] flex items-center justify-center">
+                  <Play className="w-7 h-7 fill-current ml-1" />
+                </span>
+                <span className="font-topic text-sm font-bold">Tap to join playback</span>
+                <span className="text-xs text-[#9c978b]">Your browser needs a tap before it can play the video.</span>
+              </button>
+            )}
+
+            {!isPlaying && !needsTap && !videoError && (
+              <div className="absolute top-3 left-3 px-3 py-1 rounded-full bg-black/60 border border-white/10 text-[11px] text-[#FAF7F1] font-mono pointer-events-none">
+                {canControl ? 'Press play to start for everyone' : 'Waiting for the host to press play'}
+              </div>
+            )}
+
+            {/* Floating reactions */}
+            <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
+              {floating.map((reaction) => (
                 <div
                   key={reaction.id}
                   style={{ left: `${reaction.x}%` }}
@@ -413,35 +466,39 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
               ))}
             </div>
 
-            {/* Playback overlay controls */}
+            {/* Controls */}
             <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent p-4 opacity-90 group-hover:opacity-100 transition-opacity flex flex-col gap-2">
               <input
                 type="range"
+                aria-label="Seek"
                 min={0}
                 max={duration || 100}
                 step={0.1}
-                value={currentTime}
-                onChange={handleSeek}
+                value={Math.min(sliderValue, duration || 100)}
+                disabled={!canControl}
+                onChange={(e) => setScrub(parseFloat(e.target.value))}
                 onPointerUp={commitSeek}
-                onKeyUp={(e) => {
-                  if (SEEK_KEYS.includes(e.key)) commitSeek();
-                }}
-                aria-label="Seek"
-                className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-[#FAF7F1]"
+                onPointerCancel={commitSeek}
+                onKeyUp={commitSeek}
+                onBlur={commitSeek}
+                title={canControl ? undefined : CONTROL_DENIED}
+                className="w-full h-1.5 bg-white/20 rounded-lg appearance-none accent-[#FAF7F1] cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
               />
 
               <div className="flex items-center justify-between text-xs text-[#FAF7F1] pt-1">
                 <div className="flex items-center gap-4">
                   <button
                     onClick={togglePlayPause}
-                    className="p-2 rounded-xl bg-[#FAF7F1] hover:bg-white text-[#090a0d] font-bold transition-all active:scale-95 cursor-pointer"
-                    aria-label={isPlaying ? 'Pause' : 'Play'}
+                    aria-label={isPlaying ? 'Pause for everyone' : 'Play for everyone'}
+                    disabled={!canControl}
+                    title={canControl ? undefined : CONTROL_DENIED}
+                    className="p-2 rounded-xl bg-[#FAF7F1] hover:bg-white text-[#090a0d] font-bold transition-all active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
                   </button>
 
                   <div className="font-mono text-xs text-[#FAF7F1]">
-                    <span>{formatSeconds(currentTime)}</span>
+                    <span>{formatSeconds(sliderValue)}</span>
                     <span className="text-[#9c978b] mx-1">/</span>
                     <span className="text-[#9c978b]">{formatSeconds(duration)}</span>
                   </div>
@@ -449,39 +506,35 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
                   <button
                     onClick={forceResync}
                     className="flex items-center gap-1.5 text-xs text-[#9c978b] hover:text-[#FAF7F1] transition-colors ml-2 cursor-pointer"
-                    title="Send my position and play state to every tab in the room"
+                    title="Jump straight to where the room is"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">Force Sync</span>
+                    <span className="hidden sm:inline">Resync</span>
                   </button>
                 </div>
 
                 <div className="flex items-center gap-3">
                   <button
-                    onClick={() => {
-                      if (videoRef.current) {
-                        videoRef.current.muted = !isMuted;
-                        setIsMuted(!isMuted);
-                      }
-                    }}
-                    className="p-1.5 text-[#9c978b] hover:text-[#FAF7F1] transition-colors cursor-pointer"
+                    onClick={toggleMute}
                     aria-label={isMuted ? 'Unmute' : 'Mute'}
+                    className="p-1.5 text-[#9c978b] hover:text-[#FAF7F1] transition-colors cursor-pointer"
                   >
                     {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                   </button>
-
+                  <input
+                    type="range"
+                    aria-label="Volume (only for you)"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={isMuted ? 0 : volume}
+                    onChange={(e) => changeVolume(parseFloat(e.target.value))}
+                    className="hidden sm:block w-20 h-1 bg-white/20 rounded-lg appearance-none accent-[#FAF7F1] cursor-pointer"
+                  />
                   <button
-                    onClick={() => {
-                      if (videoRef.current) {
-                        if (document.fullscreenElement) {
-                          document.exitFullscreen();
-                        } else {
-                          videoRef.current.requestFullscreen();
-                        }
-                      }
-                    }}
-                    className="p-1.5 text-[#9c978b] hover:text-[#FAF7F1] transition-colors cursor-pointer"
+                    onClick={toggleFullscreen}
                     aria-label="Toggle fullscreen"
+                    className="p-1.5 text-[#9c978b] hover:text-[#FAF7F1] transition-colors cursor-pointer"
                   >
                     <Maximize className="w-4 h-4" />
                   </button>
@@ -490,131 +543,179 @@ export const WatchRoomView: React.FC<WatchRoomViewProps> = ({ room, onLeaveRoom 
             </div>
           </div>
 
-          {/* Quick Reaction Bar */}
+          {/* Reactions */}
           <div className="flex items-center justify-between p-3 rounded-2xl bg-[#0f1117] border border-white/[0.08]">
             <div className="flex items-center gap-2">
-              <span className="text-xs text-[#9c978b] font-medium hidden sm:inline font-topic">
-                Reactions:
-              </span>
-              {ALLOWED_REACTIONS.map((emoji) => (
+              <span className="text-xs text-[#9c978b] font-medium hidden sm:inline font-topic">Reactions:</span>
+              {REACTION_KINDS.map((kind) => (
                 <button
-                  key={emoji}
-                  onClick={() => sendReaction(emoji)}
+                  key={kind}
+                  onClick={() => sendReaction(kind)}
+                  aria-label={`Send ${kind} reaction`}
                   className="px-2.5 py-1 text-lg rounded-xl bg-white/[0.04] hover:bg-white/[0.1] hover:scale-110 active:scale-95 transition-all cursor-pointer"
                 >
-                  {emoji}
+                  {REACTIONS[kind]}
                 </button>
               ))}
             </div>
-
             <div className="flex items-center gap-2 text-xs text-[#9c978b]">
-              <ShieldCheck className="w-3.5 h-3.5 text-[#FAF7F1]" />
-              <span>Syncs across tabs in this browser</span>
+              <Users className="w-3.5 h-3.5 text-[#FAF7F1]" />
+              <span>
+                {members.length} watching
+              </span>
             </div>
           </div>
+
+          {film?.credit && (
+            <p className="text-[11px] text-[#9c978b]/80 px-1">
+              {film.creditUrl ? (
+                <a href={film.creditUrl} target="_blank" rel="noopener noreferrer" className="hover:text-[#FAF7F1] underline underline-offset-2">
+                  {film.credit}
+                </a>
+              ) : (
+                film.credit
+              )}
+            </p>
+          )}
         </div>
 
-        {/* Right Column: Campus Notebook Chat & Notes (4 cols) */}
+        {/* Side panel */}
         <div className="lg:col-span-4 flex flex-col rounded-3xl bg-[#0f1117] border border-white/10 overflow-hidden shadow-xl min-h-[520px]">
-          {/* Tab Selector */}
-          <div className="flex items-center border-b border-white/[0.08] bg-black/20 p-2 gap-1.5">
-            <button
-              onClick={() => setActiveTab('chat')}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-topic font-semibold transition-all cursor-pointer ${
-                activeTab === 'chat'
-                  ? 'bg-white/[0.08] text-[#FAF7F1] border border-white/10'
-                  : 'text-[#9c978b] hover:text-[#FAF7F1]'
-              }`}
-            >
-              <MessageSquare className="w-3.5 h-3.5 text-[#FAF7F1]" />
-              <span>Room Chat</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('notes')}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-topic font-semibold transition-all cursor-pointer ${
-                activeTab === 'notes'
-                  ? 'bg-white/[0.08] text-[#FAF7F1] border border-white/10'
-                  : 'text-[#9c978b] hover:text-[#FAF7F1]'
-              }`}
-            >
-              <BookOpen className="w-3.5 h-3.5 text-[#FAF7F1]" />
-              <span>Notebook</span>
-            </button>
+          <div role="tablist" className="flex items-center border-b border-white/[0.08] bg-black/20 p-2 gap-1.5">
+            {(
+              [
+                { id: 'chat', label: 'Chat', icon: MessageSquare },
+                { id: 'viewers', label: `Viewers (${members.length})`, icon: Users },
+                { id: 'notes', label: 'Notes', icon: BookOpen },
+              ] as const
+            ).map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                role="tab"
+                aria-selected={activeTab === id}
+                onClick={() => setActiveTab(id)}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-topic font-semibold transition-all cursor-pointer ${
+                  activeTab === id ? 'bg-white/[0.08] text-[#FAF7F1] border border-white/10' : 'text-[#9c978b] hover:text-[#FAF7F1]'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5 text-[#FAF7F1]" />
+                <span>{label}</span>
+              </button>
+            ))}
           </div>
 
-          {/* Tab Content 1: Campus Chat */}
-          {activeTab === 'chat' ? (
-            <div className="flex-1 flex flex-col justify-between p-4 relative notebook-ruled-lines">
-              <div className="absolute left-10 top-0 bottom-0 w-[1px] bg-white/[0.06] pointer-events-none" />
-
-              <div className="flex-1 overflow-y-auto space-y-3.5 pr-1 max-h-[400px] custom-scrollbar">
-                {chatMessages.length === 0 ? (
-                  <div className="text-center py-12 text-xs text-[#9c978b]">
-                    No messages yet. Send a note or reaction!
-                  </div>
+          {activeTab === 'chat' && (
+            <div className="flex-1 flex flex-col justify-between p-4 relative notebook-ruled-lines min-h-0">
+              <div className="flex-1 overflow-y-auto space-y-3.5 pr-1 max-h-[400px] custom-scrollbar" aria-live="polite">
+                {chat.length === 0 ? (
+                  <div className="text-center py-12 text-xs text-[#9c978b]">No messages yet. Say hello!</div>
                 ) : (
-                  chatMessages.map((msg) => (
-                    <div key={msg.id} className="text-xs space-y-1 relative pl-5">
-                      <div className="flex items-center justify-between">
-                        <span className="font-topic font-semibold text-[#FAF7F1]">
-                          {msg.senderName}
+                  chat.map((msg) => (
+                    <div key={msg.id} className="text-xs space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-topic font-semibold text-[#FAF7F1] truncate">
+                          {msg.name}
+                          {msg.uid === meta.hostUid && <Crown className="inline w-3 h-3 ml-1 -mt-0.5 text-amber-300" aria-label="Host" />}
+                          {msg.uid === user.id && <span className="text-[#9c978b] font-normal"> (you)</span>}
                         </span>
-                        <div className="flex items-center gap-1.5 font-mono text-[10px] text-[#9c978b]">
-                          {msg.videoTimestamp !== undefined && (
+                        <div className="flex items-center gap-1.5 font-mono text-[10px] text-[#9c978b] shrink-0">
+                          {msg.videoTime !== undefined &&
+                            (canControl ? (
+                              <button
+                                onClick={() => jumpToTimecode(msg.videoTime!)}
+                                className="text-[#FAF7F1] hover:underline cursor-pointer"
+                                title="Jump everyone to this moment"
+                              >
+                                [{formatSeconds(msg.videoTime)}]
+                              </button>
+                            ) : (
+                              <span>[{formatSeconds(msg.videoTime)}]</span>
+                            ))}
+                          <span>{formatClock(msg.at)}</span>
+                          {isHost && (
                             <button
-                              onClick={() => jumpToTimecode(msg.videoTimestamp!)}
-                              className="text-[#FAF7F1] hover:underline cursor-pointer"
-                              title="Jump this tab's video to this timestamp"
+                              onClick={() => runAction(actions.removeChat(msg.id), 'Could not delete that message.')}
+                              aria-label="Delete message"
+                              className="text-[#9c978b] hover:text-rose-300 cursor-pointer"
                             >
-                              [{formatSeconds(msg.videoTimestamp)}]
+                              <X className="w-3 h-3" />
                             </button>
                           )}
-                          <span>{msg.timestamp}</span>
                         </div>
                       </div>
-                      <p className="text-[#FAF7F1] leading-relaxed bg-black/30 p-2 rounded-xl border border-white/[0.04]">
+                      {/* React escapes this text, so messages can never run as HTML */}
+                      <p className="text-[#FAF7F1] leading-relaxed bg-black/30 p-2 rounded-xl border border-white/[0.04] break-words whitespace-pre-wrap">
                         {msg.text}
                       </p>
                     </div>
                   ))
                 )}
+                <div ref={chatEndRef} />
               </div>
 
-              {/* Chat Input */}
               <form onSubmit={handleSendChat} className="pt-3 border-t border-white/[0.08] mt-2 flex gap-2">
                 <input
                   type="text"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   maxLength={300}
-                  placeholder="Note in margins... (auto-tags time)"
+                  aria-label="Message"
+                  placeholder="Write a note... (tags the video time)"
                   className="flex-1 px-3 py-2 rounded-xl bg-black/50 border border-white/10 text-xs text-[#FAF7F1] focus:outline-none focus:border-[#FAF7F1]"
                 />
                 <button
                   type="submit"
-                  className="p-2 rounded-xl bg-[#FAF7F1] hover:bg-white text-[#090a0d] transition-colors cursor-pointer"
-                  title="Send message"
                   aria-label="Send message"
+                  className="p-2 rounded-xl bg-[#FAF7F1] hover:bg-white text-[#090a0d] transition-colors cursor-pointer"
                 >
                   <Send className="w-3.5 h-3.5" />
                 </button>
               </form>
             </div>
-          ) : (
-            /* Tab Content 2: Screening Notes (saved in this browser, per room) */
+          )}
+
+          {activeTab === 'viewers' && (
+            <ul className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar">
+              {members.map((member) => (
+                <li
+                  key={member.uid}
+                  className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-black/30 border border-white/[0.05] text-xs"
+                >
+                  <span className="flex items-center gap-2 min-w-0 text-[#FAF7F1]">
+                    <span className="w-6 h-6 rounded-lg bg-white/[0.06] border border-white/10 flex items-center justify-center font-bold text-[10px] shrink-0">
+                      {member.name.slice(0, 2).toUpperCase()}
+                    </span>
+                    <span className="truncate">{member.name}</span>
+                    {member.uid === meta.hostUid && <Crown className="w-3 h-3 text-amber-300 shrink-0" aria-label="Host" />}
+                    {member.uid === user.id && <span className="text-[#9c978b]">(you)</span>}
+                  </span>
+                  {isHost && member.uid !== user.id && (
+                    <button
+                      onClick={() => confirmRemove(member.uid, member.name)}
+                      className="text-[11px] text-[#9c978b] hover:text-rose-300 cursor-pointer shrink-0"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </li>
+              ))}
+              {members.length === 0 && <li className="text-center py-12 text-xs text-[#9c978b]">Nobody here yet.</li>}
+            </ul>
+          )}
+
+          {activeTab === 'notes' && (
             <div className="flex-1 flex flex-col p-4 relative notebook-ruled-lines">
               <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/[0.06]">
-                <span className="font-topic text-[11px] font-mono text-[#FAF7F1] uppercase tracking-wide">
-                  Screening Journal Pad
-                </span>
-                <span className="text-[11px] text-[#9c978b]">Saved in this browser</span>
+                <span className="font-topic text-[11px] font-mono text-[#FAF7F1] uppercase tracking-wide">Private notes</span>
+                <span className="text-[11px] text-[#9c978b]">Saved on this device only</span>
               </div>
               <textarea
                 value={notes}
-                onChange={(e) => setNotes(e.target.value.slice(0, MAX_NOTES_CHARS))}
+                onChange={(e) => setNotes(e.target.value.slice(0, NOTES_MAX))}
                 rows={14}
+                aria-label="Private notes"
                 className="w-full flex-1 bg-transparent border-0 text-xs text-[#FAF7F1] font-mono leading-relaxed resize-none focus:outline-none custom-scrollbar p-1"
-                placeholder="Type your film critique, timestamps, and camera analysis..."
+                placeholder="Jot down thoughts and timestamps. Only you can see these."
               />
             </div>
           )}

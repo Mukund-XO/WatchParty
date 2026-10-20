@@ -1,58 +1,74 @@
 # Watch Party
 
-Pick a film, get a 6-digit room code, and watch together: play, pause and seek are shared, and there is a chat and a notes pad that tags messages with the video timestamp.
+Watch a video together with friends, in sync. Pick a film (or paste a direct video link), share a private room code, and everyone's player follows the same play, pause and seek. Live chat, reactions and a viewer list included.
 
-> **Status: front-end prototype.** There is no server yet, so rooms only work between **tabs of the same browser**. A different browser, a private window or another device cannot see a room. See [Limitations](#limitations) and [Roadmap](#roadmap).
+**Stack:** React 19, TypeScript, Vite, Tailwind 4, Firebase Authentication (anonymous) and Firebase Realtime Database.
 
-## Run it
+## Set it up (about 10 minutes)
+
+1. Create a project at <https://console.firebase.google.com>.
+2. **Authentication > Sign-in method:** enable **Anonymous**.
+3. **Realtime Database:** create a database (locked mode is fine). Note its URL.
+4. **Project settings > Your apps:** add a **Web app** and copy its config.
+5. Locally: `cp .env.example .env.local` and fill in the five `VITE_FIREBASE_*` values.
+6. Deploy the security rules and the site (needs `npm i -g firebase-tools` and `firebase login`):
+
+   ```bash
+   cp .firebaserc.example .firebaserc      # then put your project id inside
+   npm install
+   firebase deploy --only database          # publishes database.rules.json  (do this first!)
+   npm run build && firebase deploy --only hosting
+   ```
+
+7. **Lock down the API key:** Google Cloud console > APIs & Services > Credentials > your browser key > restrict to your site's address (HTTP referrers).
+8. Recommended: turn on **App Check** (reCAPTCHA) for Authentication and Realtime Database, and set a **budget alert**, to limit automated abuse.
+
+Until step 5 is done the site shows a "not connected" notice instead of working.
 
 ```bash
-npm install
-npm run dev        # http://localhost:3000 (this machine only)
-npm run build      # production build in dist/
+npm run dev        # http://localhost:3000
+npm test           # database rules + sync engine tests
 npm run lint       # type check
+npm run build      # type check + production build in dist/
 ```
-
-`npm run dev:lan` also exposes the dev server to your network. Only use it on networks you trust, because dev servers are not meant to be public.
-
-To try the sync: click **Launch New Watch Room**, copy the invite link, open it in a second tab of the same browser, and press play in either tab.
 
 ## How it works
 
-- **Stack:** React 19, TypeScript, Vite, Tailwind CSS 4. No backend.
-- **Rooms:** creating a room generates a random 6-digit code (Web Crypto) and stores a small record in `localStorage` so another tab can join it by code or by the `#room=123456` link. Records expire after 24 hours.
-- **Sync:** `src/components/SyncEngine.ts` sends messages over a `BroadcastChannel` named after the room. Message types are `PLAY`, `PAUSE`, `SEEK`, `CHAT`, `REACTION` and `SYNC_REQUEST` (a tab that joins late asks the others for their position). A `storage`-event fallback is used only if `BroadcastChannel` is missing.
-- **Seeking:** dragging the slider moves only your tab; the new position is sent when you release it.
-- **Identity:** there are no accounts. Each tab gets a random id for every page load; only your display name is remembered in `localStorage`.
+- **Identity:** every visitor is signed in anonymously by Firebase: a random user id, no password, no personal data. Clearing site data creates a new identity. Only the display name is kept in `localStorage`.
+- **Rooms:** `rooms/<code>` holds `meta` (host, title, video link, control mode), `playback`, `members`, `chat`, `reactions`. Codes are 10 random characters (50 bits). Rooms cannot be listed, only opened by someone who knows the code, and stop working after 24 hours.
+- **Sync (`src/lib/playbackSync.ts`):** the room stores one fact: "at server time T the video was at position P and was playing/paused". Every client computes the target position from that using the database's server clock (so wrong device clocks do not matter) and steers its own `<video>`: small errors are corrected with a 5% speed change, large ones by seeking. Late joiners compute the same target on arrival. If the browser blocks autoplay, a "Tap to join playback" overlay appears.
+- **Control:** by default only the host can play, pause and seek; the host can switch the room to "everyone". Enforced by the database rules, not just the UI.
+- **Presence:** members are added on join and removed automatically on disconnect (`onDisconnect`). The host can remove and ban a viewer and delete chat messages.
 
-## Limitations
+## Security
 
-- Sync does not cross browsers or devices (no server).
-- Anyone in a room can control playback. There is no host role, because it could not be enforced without a server.
-- Rate limits and message checks run in the browser, so they protect your own tab but cannot stop a determined user.
-- Chat names are self-declared and can be spoofed.
-- Custom video links are loaded directly by every viewer's browser, so the site hosting the video can see viewers' IP addresses. Only use sources you trust.
+What the rules (`database.rules.json`) enforce on the server:
 
-## Security notes
+- Nothing is readable or writable without sign-in; no listing of rooms or the database root.
+- A room can be created once and never overwritten; the host cannot be changed; the video link cannot be swapped after creation.
+- Only the host (or members, if the host chose "everyone") can write `playback`; timestamps must be the server's time; author fields must equal the caller's uid.
+- Chat and reactions: members only, as themselves, under their registered name, with length limits, a fixed set of reactions, and no editing. Only the host can delete.
+- Video links must be `https://` on a real domain name: no raw IP addresses, no `localhost`/internal suffixes, no embedded credentials.
+- Rooms expire after 24 hours.
 
-- Incoming sync messages are validated: message type whitelist, bounded numbers, recency check, rebuilt payloads, sanitized text, and a fixed set of allowed reactions.
-- Custom video links must be `https://` URLs on public-looking domain names (no credentials, raw IP addresses or internal hostnames). This is a client-side check and cannot detect a public name that points to a private address.
-- The production build adds a Content-Security-Policy `<meta>` tag (see `vite.config.ts`). A `<meta>` tag cannot set `frame-ancestors` or `X-Content-Type-Options`, so when you deploy, also send real HTTP headers if your host allows it:
-  - `Content-Security-Policy` with `frame-ancestors 'none'`
-  - `X-Content-Type-Options: nosniff`
-  - `Referrer-Policy: strict-origin-when-cross-origin`
-  - `Permissions-Policy` that disables features the app does not use
-- `.env.example` is left over from the AI Studio template; the app uses no environment variables. If you add AI features, call the API from a server. Never put an API key in the browser bundle.
+Browser side: all text is rendered by React (no raw HTML), data read back from the database is re-validated before use, the build ships a strict Content-Security-Policy (`script-src 'self'`; connections only to Firebase), and `firebase.json` adds headers (CSP with `frame-ancestors 'none'`, HSTS, nosniff, Referrer-Policy, Permissions-Policy). Fonts are bundled, so no request goes to Google Fonts. The old hardcoded student identity and fake login were removed.
 
-## Roadmap
+## Known limits
 
-1. Real-time backend (WebSocket service, or a hosted realtime database) so rooms work across devices.
-2. Server-held room state (position, play state) and a snapshot for late joiners.
-3. A host role enforced on the server, longer random room IDs and server-side rate limiting.
+- **No rate limiting on the server.** Realtime Database rules cannot throttle writes, so a determined user could spam chat. Client-side limits only protect honest users. Use App Check, budget alerts, and if needed a Cloud Function for throttling.
+- **Anonymous accounts are cheap to create**, so a banned viewer can come back with a new browser profile.
+- **Custom video links** are loaded directly by every viewer's browser, so that site can see their IP addresses. The browser cannot detect a public name that points at a private address (DNS rebinding). Only direct MP4/WebM links work, not YouTube pages. Only share videos you have the right to share.
+- Sync accuracy depends on each viewer's connection and buffering; typical drift is well under a second.
+
+## Testing status
+
+- `npm test` runs 93 tests: the database rules (simulated with `targaryen`, including that the browser-side and server-side URL checks agree) and the sync engine against a simulated video element.
+- The real UI was also driven by several separate Chromium browsers against an in-memory stand-in for Firebase (same API, no rules). Host and guests stayed within about 0.1 s through play, pause, seek and a late join; chat text was shown as plain text, not HTML; reactions, host-only vs everyone control, removing a viewer, presence on tab close and the "room not found" screen all behaved correctly.
+- **Not verified:** a run against the real Firebase emulator or a live project (the emulator could not be downloaded where this was built), and the "Tap to join playback" overlay in a real browser (covered only by a unit test). After deploying, do a two-device check: create a room on one device, join on another, press play. Use the Rules Playground in the Firebase console to spot-check the rules.
 
 ## Credits
 
-The sample films are the Blender Foundation's open movies, streamed from Google's public sample bucket. They are used under Creative Commons Attribution licenses:
+The sample films are the Blender Foundation's open movies, streamed from Google's public sample bucket under Creative Commons Attribution licenses.
 
 | Film | Credit | License |
 | --- | --- | --- |
@@ -61,4 +77,4 @@ The sample films are the Blender Foundation's open movies, streamed from Google'
 | Sintel (2010) | © Blender Foundation, [durian.blender.org](https://durian.blender.org/) | CC BY 3.0 |
 | Elephants Dream (2006) | © 2006 Blender Foundation / Netherlands Media Art Institute, [orange.blender.org](https://orange.blender.org/) | CC BY 2.5 |
 
-Generated from the [google-gemini/aistudio-repository-template](https://github.com/google-gemini/aistudio-repository-template).
+Started from the [google-gemini/aistudio-repository-template](https://github.com/google-gemini/aistudio-repository-template).

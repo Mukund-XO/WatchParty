@@ -1,97 +1,52 @@
 import React, { useState } from 'react';
 import { Play, KeyRound, ArrowDown, Users, Film, ArrowRight } from 'lucide-react';
-import { validateRoomCode } from '../utils/security';
+import { ROOM_CODE_LENGTH, validateRoomCode } from '../utils/security';
 
 interface HeroSectionProps {
   onCreateRoom: () => void;
-  /** Returns an error message to display, or null when the room was joined. */
+  /** Returns an error message to display, or null when the room is being opened. */
   onJoinRoom: (code: string) => string | null;
   onScrollToListings: () => void;
+  /** False until the visitor is signed in; the buttons wait for it. */
+  ready: boolean;
 }
 
-export const HeroSection: React.FC<HeroSectionProps> = ({
-  onCreateRoom,
-  onJoinRoom,
-  onScrollToListings,
-}) => {
-  const [digits, setDigits] = useState(['', '', '', '', '', '']);
+/** Shows what the person types as "ABCDE-FGHJK", without ever storing the dash. */
+function formatForInput(raw: string): string {
+  const cleaned = raw.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, ROOM_CODE_LENGTH);
+  return cleaned.length > 5 ? `${cleaned.slice(0, 5)}-${cleaned.slice(5)}` : cleaned;
+}
+
+export const HeroSection: React.FC<HeroSectionProps> = ({ onCreateRoom, onJoinRoom, onScrollToListings, ready }) => {
+  const [code, setCode] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
-  const [isJoining, setIsJoining] = useState(false);
 
-  const handleDigitChange = (index: number, value: string) => {
-    const clean = value.replace(/\D/g, '');
-    if (!clean) {
-      const updated = [...digits];
-      updated[index] = '';
-      setDigits(updated);
-      setErrorMsg('');
+  const submitJoin = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!validateRoomCode(code)) {
+      setErrorMsg('Enter the 10-character room code, for example 7K2QM-X9DPA.');
       return;
     }
-
-    if (clean.length >= 6) {
-      const pasteArr = clean.slice(0, 6).split('');
-      setDigits(pasteArr);
-      const nextInput = document.getElementById(`digit-input-5`);
-      nextInput?.focus();
-      return;
-    }
-
-    const char = clean.slice(-1);
-    const updated = [...digits];
-    updated[index] = char;
-    setDigits(updated);
-    setErrorMsg('');
-
-    if (index < 5 && char) {
-      const nextInput = document.getElementById(`digit-input-${index + 1}`);
-      nextInput?.focus();
-    }
-  };
-
-  const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Backspace' && !digits[index] && index > 0) {
-      const prevInput = document.getElementById(`digit-input-${index - 1}`);
-      prevInput?.focus();
-    } else if (e.key === 'Enter') {
-      submitJoin();
-    }
-  };
-
-  const submitJoin = () => {
-    const rawCode = digits.join('');
-    const validCode = validateRoomCode(rawCode);
-    if (!validCode) {
-      setErrorMsg('Please enter a valid 6-digit room passkey');
-      return;
-    }
-    setIsJoining(true);
-    setTimeout(() => {
-      const error = onJoinRoom(validCode);
-      if (error) setErrorMsg(error);
-      setIsJoining(false);
-    }, 200);
+    const error = onJoinRoom(code);
+    if (error) setErrorMsg(error);
   };
 
   return (
     <section className="relative pt-10 pb-16 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto notebook-grid-pattern">
-      {/* Decorative notebook ruler line */}
       <div className="absolute left-4 sm:left-8 top-0 bottom-0 w-[1px] bg-[#FAF7F1]/10 pointer-events-none" />
 
-      {/* Hero Punch Line */}
       <div className="text-center max-w-3xl mx-auto pt-6 pb-12">
         <h1 className="font-topic text-4xl sm:text-5xl lg:text-6xl font-extrabold text-[#FAF7F1] tracking-tight leading-[1.1] mb-5 text-balance">
           Enjoy Every Frame With Friends.
         </h1>
 
         <p className="text-base sm:text-lg text-[#9c978b] leading-relaxed max-w-2xl mx-auto font-normal">
-          Synchronized playback, shared reactions, and timestamped margin notes.
-          Host a screening room or punch in a 6-digit code to join.
+          Pick a video, share a private room code, and everyone's player stays in step: play, pause and seek together, with live chat and
+          reactions.
         </p>
       </div>
 
-      {/* Main Split: Two Distinct Primary Action Hubs */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-4xl mx-auto my-2">
-        {/* Action 1: Create a Watch Room */}
         <div className="relative group rounded-3xl bg-[#0f1117] border border-white/10 hover:border-[#FAF7F1]/40 p-8 flex flex-col justify-between transition-all duration-300 shadow-xl shadow-black/40">
           <div>
             <div
@@ -105,12 +60,9 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
               <Play className="w-5 h-5 fill-current" />
             </div>
 
-            <h2 className="font-topic text-2xl font-bold text-[#FAF7F1] mb-2 tracking-tight">
-              Create a Watch Room
-            </h2>
+            <h2 className="font-topic text-2xl font-bold text-[#FAF7F1] mb-2 tracking-tight">Create a Watch Room</h2>
             <p className="text-sm text-[#9c978b] leading-relaxed mb-6">
-              Host a screening from the film library or paste your own video link.
-              Generate a random 6-digit room pass to share with other tabs.
+              Choose a film from the library or paste a direct video link. You get a private code and an invite link to share.
             </p>
           </div>
 
@@ -128,52 +80,49 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
               <ArrowRight className="w-4 h-4 ml-1" />
             </button>
             <div className="flex items-center justify-between text-[11px] text-[#9c978b] px-1 font-mono">
-              <span>Shared Controls · Auto-Sync</span>
-              <span className="text-[#FAF7F1]">Instant 6-Digit Pass</span>
+              <span>Host or shared controls</span>
+              <span className="text-[#FAF7F1]">Works across devices</span>
             </div>
           </div>
         </div>
 
-        {/* Action 2: Join a Created Room with 6-Digit Room Code */}
-        <div className="relative group rounded-3xl bg-[#0f1117] border border-white/10 hover:border-[#FAF7F1]/40 p-8 flex flex-col justify-between transition-all duration-300 shadow-xl shadow-black/40">
+        <form
+          onSubmit={submitJoin}
+          className="relative group rounded-3xl bg-[#0f1117] border border-white/10 hover:border-[#FAF7F1]/40 p-8 flex flex-col justify-between transition-all duration-300 shadow-xl shadow-black/40"
+        >
           <div>
             <div className="w-12 h-12 rounded-2xl bg-white/[0.04] border border-white/10 flex items-center justify-center text-[#FAF7F1] mb-6 group-hover:scale-105 transition-transform">
               <KeyRound className="w-5 h-5 text-[#FAF7F1]" />
             </div>
 
-            <h2 className="font-topic text-2xl font-bold text-[#FAF7F1] mb-2 tracking-tight">
-              Join with 6-Digit Code
-            </h2>
+            <h2 className="font-topic text-2xl font-bold text-[#FAF7F1] mb-2 tracking-tight">Join with a Room Code</h2>
             <p className="text-sm text-[#9c978b] leading-relaxed mb-4">
-              Enter the 6-digit passkey of a room created in this browser, for example from another tab, to join it.
+              Enter the code your host shared, or just open their invite link.
             </p>
 
-            {/* 6-Digit Input Grid */}
             <div className="my-4">
-              <div className="flex items-center justify-center gap-2 sm:gap-2.5">
-                {digits.map((digit, idx) => (
-                  <React.Fragment key={idx}>
-                    <input
-                      id={`digit-input-${idx}`}
-                      type="text"
-                      inputMode="numeric"
-                      maxLength={1}
-                      value={digit}
-                      onChange={(e) => handleDigitChange(idx, e.target.value)}
-                      onKeyDown={(e) => handleKeyDown(idx, e)}
-                      className="w-10 sm:w-12 h-12 sm:h-14 text-center text-lg sm:text-xl font-bold font-mono text-[#FAF7F1] bg-black/50 border border-white/15 focus:border-[var(--accent)] focus:bg-[var(--accent-subtle)] focus:ring-1 focus:ring-[var(--accent)] rounded-xl transition-all outline-none"
-                    />
-                    {idx === 2 && (
-                      <span className="text-[#9c978b] font-mono text-base font-bold select-none">
-                        -
-                      </span>
-                    )}
-                  </React.Fragment>
-                ))}
-              </div>
-
+              <label htmlFor="room-code-input" className="sr-only">
+                Room code
+              </label>
+              <input
+                id="room-code-input"
+                type="text"
+                inputMode="text"
+                autoComplete="off"
+                autoCapitalize="characters"
+                spellCheck={false}
+                value={code}
+                onChange={(e) => {
+                  setCode(formatForInput(e.target.value));
+                  setErrorMsg('');
+                }}
+                placeholder="ABCDE-FGHJK"
+                aria-invalid={errorMsg ? true : undefined}
+                aria-describedby={errorMsg ? 'room-code-error' : undefined}
+                className="w-full h-14 text-center text-xl font-bold font-mono tracking-[0.2em] text-[#FAF7F1] placeholder:text-[#9c978b]/40 bg-black/50 border border-white/15 focus:border-[var(--accent)] focus:bg-[var(--accent-subtle)] focus:ring-1 focus:ring-[var(--accent)] rounded-xl transition-all outline-none"
+              />
               {errorMsg && (
-                <p className="text-xs text-rose-400 text-center mt-2 font-medium">
+                <p id="room-code-error" role="alert" className="text-xs text-rose-400 text-center mt-2 font-medium">
                   {errorMsg}
                 </p>
               )}
@@ -182,22 +131,19 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
 
           <div className="space-y-3 pt-2">
             <button
-              onClick={submitJoin}
-              disabled={isJoining}
-              className="w-full flex items-center justify-center gap-2 px-6 py-4 rounded-2xl bg-white/[0.08] hover:bg-white/[0.14] text-[#FAF7F1] border border-white/15 hover:border-[var(--accent)]/60 font-topic font-semibold text-sm tracking-wide transition-all cursor-pointer active:scale-[0.98]"
+              type="submit"
+              disabled={!ready}
+              className="w-full flex items-center justify-center gap-2 px-6 py-4 rounded-2xl bg-white/[0.08] hover:bg-white/[0.14] text-[#FAF7F1] border border-white/15 hover:border-[var(--accent)]/60 font-topic font-semibold text-sm tracking-wide transition-all cursor-pointer active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Users className="w-4 h-4 text-[#FAF7F1]" />
-              <span>{isJoining ? 'Connecting to Room...' : 'Join Screening Room'}</span>
+              <span>{ready ? 'Join Room' : 'Connecting...'}</span>
             </button>
 
-            <p className="text-[11px] text-[#9c978b] px-1 font-mono">
-              Rooms work between tabs of one browser. Cross-device rooms need a server.
-            </p>
+            <p className="text-[11px] text-[#9c978b] px-1 font-mono">Codes are not case-sensitive. Dashes and spaces are ignored.</p>
           </div>
-        </div>
+        </form>
       </div>
 
-      {/* Hero CTA Smooth-Scroll Trigger */}
       <div className="mt-12 text-center">
         <button
           onClick={onScrollToListings}

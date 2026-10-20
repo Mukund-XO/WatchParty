@@ -4,21 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- The Content-Security-Policy is added to the production build by vite.config.ts. It is not
-         applied to the dev server, whose inline scripts it would block. -->
+         applied to the dev server, whose inline scripts it would block. Fonts are bundled with
+         the site (see src/main.tsx), so no request goes to Google Fonts. -->
     <meta name="referrer" content="strict-origin-when-cross-origin" />
     <title>Watch Party</title>
-    <meta name="description" content="Watch Party — Synchronized movie watching experience with real-time video sync, notebook aesthetics, and 6-digit room codes." />
+    <meta name="description" content="Watch Party: watch videos together in sync with friends, with private room codes, live chat and reactions." />
     <meta property="og:title" content="Watch Party" />
-    <meta property="og:description" content="Watch Party — Synchronized movie watching experience with real-time video sync, notebook aesthetics, and 6-digit room codes." />
+    <meta property="og:description" content="Watch videos together in sync with friends, with private room codes, live chat and reactions." />
     <meta property="og:type" content="website" />
-    <meta name="twitter:card" content="summary_large_image" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <meta name="twitter:card" content="summary" />
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

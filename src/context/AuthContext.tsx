@@ -1,10 +1,20 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { onAuthStateChanged, signInAnonymously } from 'firebase/auth';
 import { UserAccount } from '../types';
-import { randomId, sanitizeSingleLine } from '../utils/security';
+import { sanitizeSingleLine } from '../utils/security';
+import { getFirebase, isFirebaseConfigured, missingFirebaseConfig } from '../lib/firebase';
+
+export type AuthStatus = 'connecting' | 'ready' | 'unconfigured' | 'error';
 
 interface AuthContextType {
   user: UserAccount;
+  status: AuthStatus;
+  /** Names of environment variables that still need a value (when status is "unconfigured"). */
+  missingConfig: string[];
+  /** Safe-to-show message when status is "error". */
+  error: string | null;
   setDisplayName: (name: string) => void;
+  retry: () => void;
 }
 
 const PROFILE_KEY = 'watchparty_profile';
@@ -27,33 +37,91 @@ function readSavedName(): string | null {
   return null;
 }
 
+function describeAuthError(error: unknown): string {
+  const code = (error as { code?: string } | null)?.code ?? '';
+  if (code === 'auth/operation-not-allowed' || code === 'auth/admin-restricted-operation') {
+    return 'Anonymous sign-in is switched off for this Firebase project. Enable it under Authentication > Sign-in method.';
+  }
+  if (code === 'auth/network-request-failed') {
+    return 'Could not reach the server. Check your connection and try again.';
+  }
+  if (code === 'auth/too-many-requests') {
+    return 'Too many attempts from this device. Wait a minute and try again.';
+  }
+  return 'Could not sign in. Check your connection and try again.';
+}
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+/**
+ * Signs every visitor in anonymously with Firebase Authentication. There are no passwords and no
+ * personal data: the browser gets a random, stable user id which the database rules use to tell
+ * the host from the other viewers. Clearing site data creates a new identity.
+ */
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<UserAccount>(() => ({
-    // Generated fresh for every tab and page load and never stored. If tabs shared one id,
-    // each tab would treat the others' sync messages as its own and ignore them.
-    id: randomId('user'),
-    name: readSavedName() ?? `Guest ${Math.floor(1000 + Math.random() * 9000)}`,
-    avatar: '',
-  }));
+  const [uid, setUid] = useState('');
+  const [name, setName] = useState<string>(() => readSavedName() ?? `Guest ${Math.floor(1000 + Math.random() * 9000)}`);
+  const [status, setStatus] = useState<AuthStatus>(isFirebaseConfigured ? 'connecting' : 'unconfigured');
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured) return;
+    const { auth } = getFirebase();
+    let cancelled = false;
+    setStatus('connecting');
+    setError(null);
+
+    const stop = onAuthStateChanged(auth, (firebaseUser) => {
+      if (cancelled) return;
+      if (firebaseUser) {
+        setUid(firebaseUser.uid);
+        setStatus('ready');
+      } else {
+        setUid('');
+        signInAnonymously(auth).catch((e: unknown) => {
+          if (cancelled) return;
+          setError(describeAuthError(e));
+          setStatus('error');
+        });
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      stop();
+    };
+  }, [attempt]);
 
   // Only the display name is remembered between visits.
   useEffect(() => {
     try {
-      localStorage.setItem(PROFILE_KEY, JSON.stringify({ name: user.name }));
+      localStorage.setItem(PROFILE_KEY, JSON.stringify({ name }));
     } catch {
       // Ignore storage restrictions
     }
-  }, [user.name]);
+  }, [name]);
 
-  const setDisplayName = (name: string) => {
-    const clean = sanitizeSingleLine(name, 40);
-    if (!clean) return;
-    setUser((prev) => ({ ...prev, name: clean }));
-  };
+  const setDisplayName = useCallback((next: string) => {
+    const clean = sanitizeSingleLine(next, 40);
+    if (clean) setName(clean);
+  }, []);
 
-  return <AuthContext.Provider value={{ user, setDisplayName }}>{children}</AuthContext.Provider>;
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
+
+  const value = useMemo<AuthContextType>(
+    () => ({
+      user: { id: uid, name, avatar: '' },
+      status,
+      missingConfig: missingFirebaseConfig,
+      error,
+      setDisplayName,
+      retry,
+    }),
+    [uid, name, status, error, setDisplayName, retry],
+  );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
 export const useAuth = () => {

@@ -1,12 +1,27 @@
-import type { SyncAction, ChatMessage } from '../types';
+/**
+ * Input validation shared by the UI and the data layer.
+ *
+ * Everything here runs in the browser, so it only protects honest users from mistakes and keeps
+ * the UI tidy. The rules that actually protect the data live in database.rules.json and are
+ * enforced by Firebase. Where both exist (video URLs, room codes) tests check that they agree.
+ */
 
-/** The only reactions a peer is allowed to send. Anything else is dropped. */
-export const ALLOWED_REACTIONS: readonly string[] = ['🍿', '🔥', '👏', '😱', '❤️'];
+/** Reactions viewers can send. The keys are what is stored; the emoji are only for display. */
+export const REACTIONS = {
+  popcorn: '🍿',
+  fire: '🔥',
+  clap: '👏',
+  shock: '😱',
+  heart: '❤️',
+} as const;
 
-/** Sync messages whose timestamp is further than this from the local clock are ignored (replay protection). */
-const MAX_MESSAGE_AGE_MS = 2 * 60 * 1000;
+export type ReactionKind = keyof typeof REACTIONS;
 
-const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+export const REACTION_KINDS = Object.keys(REACTIONS) as ReactionKind[];
+
+export function isReactionKind(value: unknown): value is ReactionKind {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(REACTIONS, value);
+}
 
 /**
  * Random, URL-safe identifier such as "msg_3f2b...". Uses the Web Crypto API when available.
@@ -27,56 +42,115 @@ export function randomId(prefix = 'id'): string {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 }
 
-const BLOCKED_HOST_SUFFIXES = ['.local', '.localhost', '.internal', '.lan', '.intranet', '.corp', '.home', '.home.arpa'];
+// ---------------------------------------------------------------------------------------------
+// Room codes
+// ---------------------------------------------------------------------------------------------
+
+/** Crockford base32: digits and letters without I, L, O and U, so codes are easy to read aloud. */
+const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+export const ROOM_CODE_LENGTH = 10;
+const ROOM_CODE_PATTERN = /^[0-9A-HJKMNP-TV-Z]{10}$/;
 
 /**
- * Checks whether a user-provided video URL is acceptable to load in a <video> element.
+ * Generates a random room code with 50 bits of entropy. The alphabet has 32 symbols, which divides
+ * 256 evenly, so taking the low 5 bits of each random byte introduces no bias.
+ */
+export function generateRoomCode(): string {
+  const bytes = new Uint8Array(ROOM_CODE_LENGTH);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => CODE_ALPHABET[b & 31]).join('');
+}
+
+/**
+ * Turns what a person typed or pasted into a canonical room code, or returns null.
+ * Accepts lower case, spaces and dashes ("abcde-fghjk"), and applies the Crockford rules for
+ * look-alike characters (O reads as 0; I and L read as 1).
+ */
+export function validateRoomCode(input: string): string | null {
+  if (typeof input !== 'string' || input.length > 64) return null;
+  const normalised = input
+    .toUpperCase()
+    .replace(/[^0-9A-Z]/g, '')
+    .replace(/O/g, '0')
+    .replace(/[IL]/g, '1');
+  return ROOM_CODE_PATTERN.test(normalised) ? normalised : null;
+}
+
+/** "ABCDEFGHJK" -> "ABCDE-FGHJK" for display. */
+export function formatRoomCode(code: string): string {
+  return code.length === ROOM_CODE_LENGTH ? `${code.slice(0, 5)}-${code.slice(5)}` : code;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Video links
+// ---------------------------------------------------------------------------------------------
+
+const BLOCKED_HOST_SUFFIXES = ['.local', '.localhost', '.internal', '.lan', '.intranet', '.corp', '.home', '.arpa'];
+
+/**
+ * Checks whether a host-provided video link is acceptable, and returns it in normalised form.
  *
- * Accepts only https:// URLs on public-looking domain names: no credentials in the URL,
- * no raw IP addresses (the URL parser also normalises decimal/hex/octal forms such as
- * https://2130706433 to 127.0.0.1, so those are caught too), and no single-label or
- * internal-style hostnames.
+ * Accepts only https:// links on public-looking domain names: no credentials, no raw IP addresses
+ * (the URL parser turns decimal, hex and octal forms such as https://2130706433 into dotted
+ * quads, so those are caught too), and no single-label or internal-style hostnames.
  *
  * Limits: this runs in the browser and cannot resolve DNS, so a public name that points at a
- * private address is not detected. It also cannot stop the video host from seeing the IP
- * address of every viewer who loads the video; only use sources you trust.
+ * private address is not detected. It also cannot stop the video host from seeing the IP address
+ * of every viewer who loads the video; only use sources you trust.
  */
-export function isSafeMediaUrl(rawUrl: string): { valid: boolean; error?: string } {
+export function checkMediaUrl(rawUrl: string): { ok: true; url: string } | { ok: false; error: string } {
   if (typeof rawUrl !== 'string' || !rawUrl.trim()) {
-    return { valid: false, error: 'URL cannot be empty.' };
+    return { ok: false, error: 'URL cannot be empty.' };
   }
 
   const trimmed = rawUrl.trim();
-
   if (trimmed.length > 2048) {
-    return { valid: false, error: 'URL exceeds maximum allowable length of 2048 characters.' };
+    return { ok: false, error: 'URL exceeds maximum allowable length of 2048 characters.' };
   }
 
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
   } catch {
-    return { valid: false, error: 'Invalid URL format. Please provide a valid web address.' };
+    return { ok: false, error: 'Invalid URL format. Please provide a valid web address.' };
   }
 
   if (parsed.protocol !== 'https:') {
-    return { valid: false, error: 'Only secure HTTPS video URLs are supported.' };
+    return { ok: false, error: 'Only secure HTTPS video URLs are supported.' };
   }
 
   if (parsed.username || parsed.password) {
-    return { valid: false, error: 'URLs with embedded credentials are not allowed.' };
+    return { ok: false, error: 'URLs with embedded credentials are not allowed.' };
   }
 
   const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
   const isIpLiteral = host.startsWith('[') || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host);
   const isInternalName = !host.includes('.') || BLOCKED_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
+  // The database rules require the host to end in a letters-only label (a real top-level domain).
+  const hasPublicSuffix = /\.[a-z]{2,}$/.test(host);
 
-  if (isIpLiteral || isInternalName) {
-    return { valid: false, error: 'Use a public website address (no IP addresses or internal hostnames).' };
+  if (isIpLiteral || isInternalName || !hasPublicSuffix) {
+    return { ok: false, error: 'Use a public website address (no IP addresses or internal hostnames).' };
   }
 
-  return { valid: true };
+  // href is the parsed, normalised form (lower-case host, punycode for non-ASCII names, escaped path)
+  const href = parsed.href;
+  if (/[\s"'<>\\]/.test(href) || href.length > 2048) {
+    return { ok: false, error: 'This link contains characters that are not allowed.' };
+  }
+
+  return { ok: true, url: href };
 }
+
+/** Boolean convenience wrapper around checkMediaUrl. */
+export function isSafeMediaUrl(rawUrl: string): { valid: boolean; error?: string } {
+  const result = checkMediaUrl(rawUrl);
+  return result.ok ? { valid: true } : { valid: false, error: result.error };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------------------------------
 
 // Control characters, zero-width space, BOM and bidirectional overrides (used to visually spoof names).
 const UNSAFE_TEXT_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F​‪-‮⁦-⁩﻿]/g;
@@ -101,113 +175,9 @@ export function sanitizeSingleLine(input: string, maxLength = 50): string {
 }
 
 /**
- * Validates and strictly extracts a 6-digit room code.
- */
-export function validateRoomCode(input: string): string | null {
-  if (typeof input !== 'string') return null;
-  const digitsOnly = input.replace(/\D/g, '');
-  if (digitsOnly.length === 6 && /^[0-9]{6}$/.test(digitsOnly)) {
-    return digitsOnly;
-  }
-  return null;
-}
-
-/**
- * Validates an incoming sync message from BroadcastChannel or LocalStorage.
- * Whitelists message types, bounds every number, rebuilds the payload from scratch and
- * rejects stale or far-future messages.
- */
-export function validateSyncAction(raw: unknown, expectedRoomId: string): SyncAction | null {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return null;
-  }
-
-  const candidate = raw as Record<string, unknown>;
-
-  // Room verification
-  if (candidate.roomId !== expectedRoomId) {
-    return null;
-  }
-
-  // Type verification (whitelist)
-  const allowedTypes = ['PLAY', 'PAUSE', 'SEEK', 'CHAT', 'REACTION', 'PING', 'SYNC_REQUEST'];
-  if (typeof candidate.type !== 'string' || !allowedTypes.includes(candidate.type)) {
-    return null;
-  }
-
-  // Sender verification
-  if (typeof candidate.senderId !== 'string' || !ID_PATTERN.test(candidate.senderId)) {
-    return null;
-  }
-
-  // Timestamp must be a finite number close to the local clock (stops replays of old messages)
-  if (
-    typeof candidate.timestamp !== 'number' ||
-    !Number.isFinite(candidate.timestamp) ||
-    Math.abs(Date.now() - candidate.timestamp) > MAX_MESSAGE_AGE_MS
-  ) {
-    return null;
-  }
-
-  // Timecode sanity bounds (0 to 24 hours)
-  let currentTime: number | undefined;
-  if (candidate.currentTime !== undefined) {
-    if (
-      typeof candidate.currentTime !== 'number' ||
-      !Number.isFinite(candidate.currentTime) ||
-      candidate.currentTime < 0 ||
-      candidate.currentTime > 86400
-    ) {
-      return null;
-    }
-    currentTime = candidate.currentTime;
-  }
-
-  // Payload verification: rebuild the payload from validated fields only
-  let sanitizedPayload: unknown = undefined;
-  if (candidate.type === 'CHAT') {
-    if (!candidate.payload || typeof candidate.payload !== 'object') return null;
-    const p = candidate.payload as Record<string, unknown>;
-    const text = sanitizeTextInput(String(p.text || ''), 300);
-    const senderName = sanitizeSingleLine(String(p.senderName || 'Anonymous'), 50) || 'Anonymous';
-    if (!text) return null;
-
-    sanitizedPayload = {
-      id: sanitizeSingleLine(String(p.id || randomId('msg')), 64),
-      // Always the real sender of the sync message; a peer cannot claim another peer's id.
-      senderId: candidate.senderId,
-      senderName,
-      senderAvatar: '',
-      text,
-      timestamp: sanitizeSingleLine(String(p.timestamp || ''), 20),
-      videoTimestamp:
-        typeof p.videoTimestamp === 'number' && Number.isFinite(p.videoTimestamp)
-          ? Math.max(0, Math.min(86400, Math.floor(p.videoTimestamp)))
-          : undefined,
-    } as ChatMessage;
-  } else if (candidate.type === 'REACTION') {
-    if (!candidate.payload || typeof candidate.payload !== 'object') return null;
-    const emoji = (candidate.payload as Record<string, unknown>).emoji;
-    if (typeof emoji !== 'string' || !ALLOWED_REACTIONS.includes(emoji)) {
-      return null;
-    }
-    sanitizedPayload = { emoji };
-  }
-
-  return {
-    type: candidate.type as SyncAction['type'],
-    roomId: candidate.roomId as string,
-    senderId: candidate.senderId,
-    currentTime,
-    timestamp: candidate.timestamp,
-    payload: sanitizedPayload,
-  };
-}
-
-/**
  * Client-side sliding window rate limiter to throttle user actions (chat spam, sync bursts).
- * This only protects the local UI: anything running in a browser can be bypassed, so a real
- * server must enforce its own limits.
+ * This only protects the local UI: anything running in a browser can be bypassed, and Realtime
+ * Database rules cannot rate-limit appends, so see the README for server-side options.
  */
 export class RateLimiter {
   private timestamps: number[] = [];
